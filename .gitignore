@@ -1,0 +1,11 @@
+bin/
+obj/
+publish/
+*.user
+*.suo
+*.log
+test-sample.mp4
+
+# Optional local FFmpeg binaries are large and are not stored in this repository.
+tools/ffmpeg.exe
+tools/ffprobe.exe

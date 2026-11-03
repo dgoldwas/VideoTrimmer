@@ -41,8 +41,8 @@ Fast copy avoids video re-encoding and is quick, but it can only start cleanly o
 ## Repository contents
 
 - `MainForm.cs`, `Program.cs`, and `VideoTrimmer.csproj`: application entry, main window, and project definition.
-- `Theme.cs`, `UiControls.cs`, `TimelineControl.cs`: dark theme, custom controls, and the filmstrip timeline.
-- `TimeMath.cs`, `FfmpegRunner.cs`: frame/timecode math and FFmpeg/FFprobe process helpers.
+- `Theme.cs`, `UiControls.cs`, `TimelineControl.cs`, `ExportModeCopy.cs`: dark theme, custom controls, filmstrip timeline, and shared export-mode copy.
+- `TimeMath.cs`, `FfmpegRunner.cs`, `MediaProbe.cs`, `StillCapture.cs`, `FilmstripService.cs`, `ExportService.cs`: frame math, FFmpeg helpers, probe, stills, filmstrip, and export args.
 - `tools/README.md`: notes about optional local FFmpeg executables.
 - `UPDATE.md`: changelog and packaging notes.
 

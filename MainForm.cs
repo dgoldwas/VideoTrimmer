@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text.Json;
 
 namespace VideoTrimmer;
 
@@ -9,9 +8,8 @@ public sealed class MainForm : Form
     const string ReadyHint = "Click the filmstrip to move. Shift-click sets in. Alt-click sets out.";
 
     readonly FfmpegRunner runner = new();
-    readonly FrameCache frameCache = new();
-    readonly Dictionary<int, Bitmap?[]> filmCache = new();
-    readonly HashSet<Bitmap?[]> releasedStrips = new();
+    readonly StillCapture stills;
+    readonly FilmstripService filmstrip;
     readonly System.Windows.Forms.Timer previewTimer = new() { Interval = 60 };
     readonly System.Windows.Forms.Timer accurateTimer = new() { Interval = 220 };
     readonly System.Windows.Forms.Timer filmTimer = new() { Interval = 200 };
@@ -48,15 +46,13 @@ public sealed class MainForm : Form
     bool disposed;
     int loadGeneration;
     int previewGeneration;
-    int filmGeneration;
-    int currentStripCount;
-    int buildingCount;
     Bitmap? shown;
-    Bitmap?[]? displayedStrip;
 
     public MainForm(string? startupPath)
     {
         this.startupPath = startupPath;
+        stills = new StillCapture(runner);
+        filmstrip = new FilmstripService(runner, stills);
         Font = Theme.Ui(10);
         BackColor = Theme.Background;
         ForeColor = Theme.Text;
@@ -72,7 +68,7 @@ public sealed class MainForm : Form
         {
             filmTimer.Stop();
             var count = DesiredThumbCount();
-            if (count != currentStripCount && count != buildingCount)
+            if (count != filmstrip.CurrentCount && count != filmstrip.BuildingCount)
                 StartFilmstrip(count);
         };
         if (runner.Ffmpeg is null || runner.Ffprobe is null)
@@ -151,8 +147,8 @@ public sealed class MainForm : Form
         tips.SetToolTip(points.OutEarlier, "One frame earlier");
         tips.SetToolTip(points.OutLater, "One frame later");
         tips.SetToolTip(timeline, "Drag the handles to trim. Drag the highlighted span to slide it. Click to move the playhead.");
-        tips.SetToolTip(exportBar.Fast, "Keeps the original streams. The cut can start slightly earlier, on a keyframe.");
-        tips.SetToolTip(exportBar.Exact, "Re-encodes so the cut matches the frames you chose. Slower, and the picture can change.");
+        tips.SetToolTip(exportBar.Fast, ExportModeCopy.FastExplanation);
+        tips.SetToolTip(exportBar.Exact, ExportModeCopy.ExactExplanation);
 
         WireDrop(this);
     }
@@ -410,15 +406,8 @@ public sealed class MainForm : Form
         SetStatus("Reading metadata…", StatusKind.Busy);
         try
         {
-            var json = await runner.RunAsync(runner.Ffprobe, [
-                "-v", "quiet",
-                "-print_format", "json",
-                "-show_streams",
-                "-show_format",
-                path,
-            ], token);
+            var media = await MediaProbe.ProbeAsync(runner, path, token);
             if (generation != loadGeneration || IsDisposed) return;
-            var media = ParseProbe(json);
             ApplyMedia(path, media.Duration, media.Fps, media.Frames);
         }
         catch (OperationCanceledException)
@@ -456,34 +445,6 @@ public sealed class MainForm : Form
         SchedulePreview(true);
         StartFilmstrip(DesiredThumbCount());
         SetStatus("Building the filmstrip…", StatusKind.Busy);
-    }
-
-    static (double Duration, double Fps, long Frames) ParseProbe(string json)
-    {
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-        var video = root.GetProperty("streams").EnumerateArray()
-            .FirstOrDefault(stream => stream.ValueKind == JsonValueKind.Object && stream.TryGetProperty("codec_type", out var kind) && kind.GetString() == "video");
-        if (video.ValueKind == JsonValueKind.Undefined)
-            throw new InvalidOperationException("The file does not contain a video stream.");
-
-        double probedDuration;
-        if (video.TryGetProperty("duration", out var videoDuration) && videoDuration.ValueKind == JsonValueKind.String)
-            probedDuration = double.Parse(videoDuration.GetString()!, CultureInfo.InvariantCulture);
-        else
-            probedDuration = double.Parse(root.GetProperty("format").GetProperty("duration").GetString()!, CultureInfo.InvariantCulture);
-
-        var rate = video.GetProperty("r_frame_rate").GetString()?.Split('/');
-        if (rate is not { Length: 2 })
-            throw new InvalidOperationException("The video frame rate could not be read.");
-        var probedFps = double.Parse(rate[0], CultureInfo.InvariantCulture) / double.Parse(rate[1], CultureInfo.InvariantCulture);
-        if (probedDuration <= 0 || double.IsNaN(probedDuration) || probedFps <= 0 || double.IsNaN(probedFps) || double.IsInfinity(probedFps))
-            throw new InvalidOperationException("The video duration or frame rate could not be read.");
-
-        var rounded = Math.Round(probedDuration * probedFps, MidpointRounding.AwayFromZero);
-        if (rounded < 1 || rounded > 1_000_000_000)
-            throw new InvalidOperationException("The video duration or frame rate could not be read.");
-        return (probedDuration, probedFps, (long)rounded);
     }
 
     void OnTimelineChanged()
@@ -616,7 +577,7 @@ public sealed class MainForm : Form
     {
         if (!timeline.HasMedia || runner.Ffmpeg is null || input is null || IsDisposed) return;
         var width = PreviewWidth();
-        if (frameCache.TryGet(frame, width, accurate, out var cached) && cached is not null)
+        if (stills.Cache.TryGet(frame, width, accurate, out var cached) && cached is not null)
         {
             ShowPreview(cached);
             return;
@@ -628,7 +589,7 @@ public sealed class MainForm : Form
         Bitmap? bitmap = null;
         try
         {
-            bitmap = await CaptureStillAsync(timeline.SeekTime(frame), accurate, "scale=" + width + ":-2", accurate ? 2 : 3, token);
+            bitmap = await stills.CaptureAsync(input, duration, timeline.SeekTime(frame), accurate, "scale=" + width + ":-2", accurate ? 2 : 3, token);
         }
         catch (OperationCanceledException)
         {
@@ -642,7 +603,7 @@ public sealed class MainForm : Form
         }
 
         ShowPreview(bitmap);
-        frameCache.Put(frame, width, bitmap, accurate, shown);
+        stills.Cache.Put(frame, width, bitmap, accurate, shown);
     }
 
     void ShowPreview(Bitmap bitmap)
@@ -663,11 +624,10 @@ public sealed class MainForm : Form
     {
         if (!timeline.HasMedia || exporting || IsDisposed) return;
         var count = DesiredThumbCount();
-        if (count == currentStripCount || count == buildingCount) return;
-        if (filmCache.TryGetValue(count, out var cached))
+        if (count == filmstrip.CurrentCount || count == filmstrip.BuildingCount) return;
+        if (filmstrip.TryGetCached(count, out var cached) && cached is not null)
         {
-            ShowStrip(cached);
-            currentStripCount = count;
+            filmstrip.ShowCached(timeline, count, cached);
             return;
         }
 
@@ -683,197 +643,22 @@ public sealed class MainForm : Form
 
     void StartFilmstrip(int count)
     {
-        if (count < 1 || runner.Ffmpeg is null || input is null) 
-        {
-            timeline.Placeholder = runner.Ffmpeg is null
-                ? "FFmpeg is not available, so there is no filmstrip."
-                : "";
-            timeline.Invalidate();
-            return;
-        }
-
+        if (input is null) return;
         ReplaceCts(ref filmCts);
-        var generation = ++filmGeneration;
-        buildingCount = count;
-        _ = BuildFilmstripAsync(count, generation, filmCts.Token);
-    }
-
-    async Task BuildFilmstripAsync(int count, int generation, CancellationToken token)
-    {
-        // Sparse fast seeks stay responsive on long videos. One fps filter would decode the whole file.
-        var slots = new Bitmap?[count];
-        var height = timeline.ThumbHeight;
-        if (generation != filmGeneration || IsDisposed) return;
-        ShowStrip(slots);
-        timeline.Placeholder = "";
-        var gate = new SemaphoreSlim(4);
-        var filled = 0;
-        var tasks = new Task[count];
-        for (var i = 0; i < count; i++)
-            tasks[i] = FetchSlot(i);
-
-        try
-        {
-            await Task.WhenAll(tasks);
-        }
-        catch (OperationCanceledException)
-        {
-            // The next filmstrip replaced this one.
-        }
-        finally
-        {
-            gate.Dispose();
-        }
-
-        if (generation != filmGeneration || IsDisposed)
-        {
-            if (displayedStrip != slots)
-                ReleaseStrip(slots);
-            return;
-        }
-
-        KeepStrip(count, slots);
-        currentStripCount = count;
-        buildingCount = 0;
-        var any = false;
-        foreach (var frame in slots)
-        {
-            if (frame is null) continue;
-            any = true;
-            break;
-        }
-
-        timeline.Placeholder = any ? "" : "No preview frames could be created. You can still set the range and export.";
-        timeline.Invalidate();
-        if (!exporting)
-            SetStatus(any ? ReadyHint : timeline.Placeholder, any ? StatusKind.Info : StatusKind.Error);
-        return;
-
-        async Task FetchSlot(int index)
-        {
-            var acquired = false;
-            try
+        filmstrip.Start(
+            this,
+            timeline,
+            input,
+            duration,
+            count,
+            filmCts.Token,
+            onProgress: (filled, total) => SetStatus($"Building the filmstrip… {filled}/{total}", StatusKind.Busy),
+            onCompleted: (any, failure) =>
             {
-                await gate.WaitAsync(token);
-                acquired = true;
-                var time = count == 1 ? 0 : duration * index / (count - 1d);
-                if (time > duration - 0.05) time = Math.Max(0, duration - 0.05);
-                var bitmap = await CaptureStillAsync(time, accurate: false, "scale=-2:" + height, 5, token);
-                void Assign()
-                {
-                    if (generation != filmGeneration || IsDisposed || bitmap is null)
-                    {
-                        bitmap?.Dispose();
-                        return;
-                    }
-
-                    slots[index] = bitmap;
-                    filled++;
-                    // Paint in batches so a 32-thumb strip does not redraw on every slot.
-                    if (filled == count || (filled & 3) == 0)
-                        timeline.Invalidate();
-                    if (!exporting)
-                        SetStatus($"Building the filmstrip… {filled}/{count}", StatusKind.Busy);
-                }
-
-                if (IsDisposed || !IsHandleCreated)
-                    bitmap?.Dispose();
-                else if (InvokeRequired)
-                    BeginInvoke(Assign);
-                else
-                    Assign();
-            }
-            catch (OperationCanceledException)
-            {
-                // Canceled by the next filmstrip.
-            }
-            catch (ObjectDisposedException)
-            {
-                // The form closed while a thumbnail was still decoding.
-            }
-            finally
-            {
-                if (acquired)
-                {
-                    try { gate.Release(); } catch (ObjectDisposedException) { }
-                }
-            }
-        }
-    }
-
-    void ShowStrip(Bitmap?[]? slots)
-    {
-        displayedStrip = slots;
-        timeline.UseStrip(slots);
-    }
-
-    void KeepStrip(int count, Bitmap?[] slots)
-    {
-        foreach (var key in filmCache.Keys.ToArray())
-        {
-            if (key == count) continue;
-            var old = filmCache[key];
-            filmCache.Remove(key);
-            if (old != displayedStrip && old != slots)
-                ReleaseStrip(old);
-        }
-
-        if (filmCache.TryGetValue(count, out var existing) && existing != slots && existing != displayedStrip)
-            ReleaseStrip(existing);
-        filmCache[count] = slots;
-    }
-
-    void ReleaseStrip(Bitmap?[]? slots)
-    {
-        if (slots is null || !releasedStrips.Add(slots)) return;
-        foreach (var bitmap in slots)
-            bitmap?.Dispose();
-    }
-
-    async Task<Bitmap?> CaptureStillAsync(double seconds, bool accurate, string filter, int quality, CancellationToken token)
-    {
-        if (runner.Ffmpeg is null || input is null) return null;
-        var time = Math.Clamp(seconds, 0, Math.Max(0, duration - 0.001)).ToString("0.######", CultureInfo.InvariantCulture);
-        // Pipe JPEG to stdout so stills skip temp files. Accurate seeks after -i; fast seeks before.
-        string[] args = accurate
-            ?
-            [
-                "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-                "-i", input,
-                "-ss", time,
-                "-frames:v", "1",
-                "-vf", filter,
-                "-q:v", quality.ToString(CultureInfo.InvariantCulture),
-                "-f", "image2pipe",
-                "-vcodec", "mjpeg",
-                "pipe:1",
-            ]
-            :
-            [
-                "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-                "-ss", time,
-                "-i", input,
-                "-frames:v", "1",
-                "-vf", filter,
-                "-q:v", quality.ToString(CultureInfo.InvariantCulture),
-                "-f", "image2pipe",
-                "-vcodec", "mjpeg",
-                "pipe:1",
-            ];
-        try
-        {
-            var bytes = await runner.RunBinaryAsync(runner.Ffmpeg, args, token);
-            if (token.IsCancellationRequested || bytes.Length == 0) return null;
-            return BitmapFromJpeg(bytes);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch
-        {
-            return null;
-        }
+                if (exporting) return;
+                SetStatus(any ? ReadyHint : failure, any ? StatusKind.Info : StatusKind.Error);
+            },
+            isExporting: () => exporting);
     }
 
     void CancelPreviewJobs()
@@ -881,8 +666,7 @@ public sealed class MainForm : Form
         ReplaceCts(ref previewCts);
         ReplaceCts(ref filmCts);
         previewGeneration++;
-        filmGeneration++;
-        buildingCount = 0;
+        filmstrip.InvalidateJobs();
         previewTimer.Stop();
         accurateTimer.Stop();
         filmTimer.Stop();
@@ -893,16 +677,8 @@ public sealed class MainForm : Form
     {
         preview.Image = null;
         shown = null;
-        frameCache.Clear();
-        timeline.UseStrip(null);
-        var doomed = new HashSet<Bitmap?[]>(filmCache.Values);
-        if (displayedStrip is not null) doomed.Add(displayedStrip);
-        filmCache.Clear();
-        displayedStrip = null;
-        currentStripCount = 0;
-        foreach (var slots in doomed)
-            ReleaseStrip(slots);
-        releasedStrips.Clear();
+        stills.Clear();
+        filmstrip.Clear(timeline);
     }
 
     async void Export()
@@ -953,12 +729,13 @@ public sealed class MainForm : Form
                 statusBar.Progress.Fraction = fraction;
                 SetStatus($"{mode}… {(int)Math.Round(fraction * 100)}%", StatusKind.Busy);
             });
-            await runner.RunAsync(runner.Ffmpeg, BuildExportArguments(output), token, progress);
+            var args = ExportService.BuildArguments(input, output, timeline.InSeconds, timeline.OutSeconds, exact);
+            await runner.RunAsync(runner.Ffmpeg, args, token, progress);
             SetStatus("Saved: " + output, StatusKind.Good);
         }
         catch (OperationCanceledException)
         {
-            TryDelete(output);
+            ExportService.TryDelete(output);
             if (!IsDisposed) SetStatus("Export canceled.", StatusKind.Info);
         }
         catch (Exception ex)
@@ -987,36 +764,6 @@ public sealed class MainForm : Form
     {
         if (!exporting) return;
         exportCts.Cancel();
-    }
-
-    string[] BuildExportArguments(string output)
-    {
-        var start = timeline.InSeconds.ToString(CultureInfo.InvariantCulture);
-        var length = (timeline.OutSeconds - timeline.InSeconds).ToString(CultureInfo.InvariantCulture);
-        // Exact mode seeks after -i so the cut lands on the chosen frames. Fast copy seeks before -i.
-        return exact
-            ?
-            [
-                "-y", "-progress", "pipe:1", "-nostats",
-                "-i", input!,
-                "-ss", start,
-                "-t", length,
-                "-map", "0",
-                "-c:v", "libx264",
-                "-c:a", "aac",
-                output,
-            ]
-            :
-            [
-                "-y", "-progress", "pipe:1", "-nostats",
-                "-ss", start,
-                "-i", input!,
-                "-t", length,
-                "-map", "0",
-                "-c", "copy",
-                "-avoid_negative_ts", "make_zero",
-                output,
-            ];
     }
 
     static void ReplaceCts(ref CancellationTokenSource cts)
@@ -1054,115 +801,5 @@ public sealed class MainForm : Form
 
     int S(int logical) => LogicalToDeviceUnits(logical);
 
-    static Bitmap? BitmapFromJpeg(byte[] bytes)
-    {
-        using var stream = new MemoryStream(bytes);
-        using var image = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: false);
-        return new Bitmap(image);
-    }
-
-    static void TryDelete(string path)
-    {
-        try
-        {
-            if (File.Exists(path)) File.Delete(path);
-        }
-        catch
-        {
-            // A canceled ffmpeg process can keep the file open for a moment.
-        }
-    }
-
     enum StatusKind { Info, Busy, Good, Error }
-}
-
-sealed class FrameCache
-{
-    const int Limit = 24;
-
-    readonly record struct Key(long Frame, int Width);
-
-    sealed class Slot
-    {
-        public Bitmap? Fast;
-        public Bitmap? Accurate;
-    }
-
-    readonly Dictionary<Key, Slot> slots = new();
-    readonly Queue<Key> order = new();
-
-    public bool TryGet(long frame, int width, bool accurate, out Bitmap? bitmap)
-    {
-        bitmap = null;
-        if (!slots.TryGetValue(new Key(frame, width), out var slot)) return false;
-        if (accurate)
-        {
-            bitmap = slot.Accurate;
-            return bitmap is not null;
-        }
-
-        bitmap = slot.Accurate ?? slot.Fast;
-        return bitmap is not null;
-    }
-
-    public void Put(long frame, int width, Bitmap bitmap, bool accurate, Bitmap? shown)
-    {
-        var key = new Key(frame, width);
-        if (!slots.TryGetValue(key, out var slot))
-        {
-            slot = new Slot();
-            slots[key] = slot;
-            order.Enqueue(key);
-        }
-
-        if (accurate)
-            Replace(slot, true, bitmap, shown);
-        else if (slot.Accurate is null)
-            Replace(slot, false, bitmap, shown);
-        else
-            bitmap.Dispose();
-
-        Trim(shown);
-    }
-
-    public void Clear()
-    {
-        foreach (var slot in slots.Values)
-        {
-            slot.Fast?.Dispose();
-            slot.Accurate?.Dispose();
-        }
-
-        slots.Clear();
-        order.Clear();
-    }
-
-    static void Replace(Slot slot, bool accurate, Bitmap bitmap, Bitmap? shown)
-    {
-        var previous = accurate ? slot.Accurate : slot.Fast;
-        if (accurate) slot.Accurate = bitmap;
-        else slot.Fast = bitmap;
-        if (previous is not null && previous != bitmap && previous != shown)
-            previous.Dispose();
-    }
-
-    void Trim(Bitmap? shown)
-    {
-        var guard = 0;
-        while (order.Count > Limit && guard++ < order.Count + 2)
-        {
-            var key = order.Dequeue();
-            if (!slots.TryGetValue(key, out var slot)) continue;
-            var visible = slot.Fast == shown || slot.Accurate == shown;
-            if (visible)
-            {
-                order.Enqueue(key);
-                continue;
-            }
-
-            slot.Fast?.Dispose();
-            slot.Accurate?.Dispose();
-            slots.Remove(key);
-        }
-    }
 }

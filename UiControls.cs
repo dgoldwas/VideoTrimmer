@@ -574,8 +574,8 @@ sealed class ExportBar : Panel
     public ExportBar()
     {
         BackColor = Theme.Background;
-        Fast = new OptionCard { Title = "Fast copy", AccessibleDescription = "Keeps the original streams. The cut can start slightly earlier, on a keyframe." };
-        Exact = new OptionCard { Title = "Exact frames", AccessibleDescription = "Re-encodes so the cut matches the frames you chose. Slower, and the picture can change." };
+        Fast = new OptionCard { Title = ExportModeCopy.FastTitle, AccessibleDescription = ExportModeCopy.FastExplanation };
+        Exact = new OptionCard { Title = ExportModeCopy.ExactTitle, AccessibleDescription = ExportModeCopy.ExactExplanation };
         Export = new FlatButton { Text = "Export…", Primary = true, AccessibleName = "Export", Enabled = false };
         Cancel = new FlatButton { Text = "Cancel", AccessibleName = "Cancel export", Enabled = false, Visible = false, TextColor = Theme.OutPoint };
         Explanation = new Label
@@ -595,9 +595,7 @@ sealed class ExportBar : Panel
 
     public void SetExplanation(bool exact)
     {
-        Explanation.Text = exact
-            ? "Re-encodes so the cut matches the frames you chose. Slower, and the picture can change."
-            : "Keeps the original streams. The cut can start slightly earlier, on a keyframe.";
+        Explanation.Text = ExportModeCopy.Explanation(exact);
         Explanation.AccessibleName = Explanation.Text;
         Fast.Selected = !exact;
         Exact.Selected = exact;

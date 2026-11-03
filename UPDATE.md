@@ -13,6 +13,8 @@
 - Filmstrip cache keeps only the current strip size and clears release tracking on media change.
 - Timeline paint uses bilinear scaling, cached brushes/pens, source-crop draws without per-slot clipping, and batched invalidates while thumbs load.
 - Dispose replaced cancellation sources; skip in/out text-box writes while dragging the timeline; launch FFmpeg/FFprobe with `ArgumentList` instead of quoted argument strings.
+- Extracted `MediaProbe`, `StillCapture`/`FrameCache`, `FilmstripService`, and `ExportService` from `MainForm`.
+- Centralized Fast copy / Exact frames titles and explanations in `ExportModeCopy`.
 
 ## 2026-10-19
 

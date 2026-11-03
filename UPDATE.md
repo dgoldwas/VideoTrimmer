@@ -15,6 +15,8 @@
 - Dispose replaced cancellation sources; skip in/out text-box writes while dragging the timeline; launch FFmpeg/FFprobe with `ArgumentList` instead of quoted argument strings.
 - Extracted `MediaProbe`, `StillCapture`/`FrameCache`, `FilmstripService`, and `ExportService` from `MainForm`.
 - Centralized Fast copy / Exact frames titles and explanations in `ExportModeCopy`.
+- `FrameCache` tracks the live preview via `SetShown` so replace/trim cannot dispose it; covered by `--check`.
+- Exact export adds High / Balanced / Small quality presets (CRF + x264 preset) and optional copy-audio; fast copy unchanged.
 
 ## 2026-10-19
 

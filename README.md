@@ -8,6 +8,7 @@ A small Windows desktop app for selecting and exporting a section of a video. Vi
 - Scrub a filmstrip. Drag the in and out handles, or type a timecode and a frame number together.
 - The preview fills the window and follows the playhead.
 - Export a fast stream copy, or re-encode for exact frames. Fast copy can start slightly early, on a keyframe.
+- Exact mode offers High / Balanced / Small quality presets and an optional copy-audio setting.
 - Preserve mapped streams in fast-copy mode (`-map 0`), including audio and subtitles supported by the selected output container.
 
 ## Controls
@@ -41,7 +42,7 @@ Fast copy avoids video re-encoding and is quick, but it can only start cleanly o
 ## Repository contents
 
 - `MainForm.cs`, `Program.cs`, and `VideoTrimmer.csproj`: application entry, main window, and project definition.
-- `Theme.cs`, `UiControls.cs`, `TimelineControl.cs`, `ExportModeCopy.cs`: dark theme, custom controls, filmstrip timeline, and shared export-mode copy.
+- `Theme.cs`, `UiControls.cs`, `TimelineControl.cs`, `ExportModeCopy.cs`, `ExactExportOptions.cs`: dark theme, custom controls, filmstrip timeline, and export-mode copy/presets.
 - `TimeMath.cs`, `FfmpegRunner.cs`, `MediaProbe.cs`, `StillCapture.cs`, `FilmstripService.cs`, `ExportService.cs`: frame math, FFmpeg helpers, probe, stills, filmstrip, and export args.
 - `tools/README.md`: notes about optional local FFmpeg executables.
 - `UPDATE.md`: changelog and packaging notes.

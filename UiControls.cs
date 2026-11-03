@@ -566,16 +566,28 @@ sealed class ExportBar : Panel
 {
     public OptionCard Fast { get; }
     public OptionCard Exact { get; }
+    public OptionCard QualityHigh { get; }
+    public OptionCard QualityBalanced { get; }
+    public OptionCard QualitySmall { get; }
+    public OptionCard CopyAudio { get; }
     public FlatButton Export { get; }
     public FlatButton Cancel { get; }
     public Label Explanation { get; }
+
     bool narrow;
+    bool exactMode;
+    ExactQuality quality = ExactExportOptions.Default.Quality;
+    bool copyAudio;
 
     public ExportBar()
     {
         BackColor = Theme.Background;
         Fast = new OptionCard { Title = ExportModeCopy.FastTitle, AccessibleDescription = ExportModeCopy.FastExplanation };
-        Exact = new OptionCard { Title = ExportModeCopy.ExactTitle, AccessibleDescription = ExportModeCopy.ExactExplanation };
+        Exact = new OptionCard { Title = ExportModeCopy.ExactTitle, AccessibleDescription = ExportModeCopy.ExactBaseExplanation };
+        QualityHigh = new OptionCard { Title = ExactExportPresets.Title(ExactQuality.High), AccessibleDescription = ExactExportPresets.Hint(ExactQuality.High), Visible = false };
+        QualityBalanced = new OptionCard { Title = ExactExportPresets.Title(ExactQuality.Balanced), AccessibleDescription = ExactExportPresets.Hint(ExactQuality.Balanced), Visible = false };
+        QualitySmall = new OptionCard { Title = ExactExportPresets.Title(ExactQuality.Small), AccessibleDescription = ExactExportPresets.Hint(ExactQuality.Small), Visible = false };
+        CopyAudio = new OptionCard { Title = ExportModeCopy.CopyAudioTitle, AccessibleDescription = ExactExportPresets.AudioHint(true), Visible = false };
         Export = new FlatButton { Text = "Export…", Primary = true, AccessibleName = "Export", Enabled = false };
         Cancel = new FlatButton { Text = "Cancel", AccessibleName = "Cancel export", Enabled = false, Visible = false, TextColor = Theme.OutPoint };
         Explanation = new Label
@@ -587,24 +599,101 @@ sealed class ExportBar : Panel
         };
         Controls.Add(Fast);
         Controls.Add(Exact);
+        Controls.Add(QualityHigh);
+        Controls.Add(QualityBalanced);
+        Controls.Add(QualitySmall);
+        Controls.Add(CopyAudio);
         Controls.Add(Export);
         Controls.Add(Cancel);
         Controls.Add(Explanation);
-        SetExplanation(false);
+
+        QualityHigh.Click += (_, _) => SetQuality(ExactQuality.High);
+        QualityBalanced.Click += (_, _) => SetQuality(ExactQuality.Balanced);
+        QualitySmall.Click += (_, _) => SetQuality(ExactQuality.Small);
+        CopyAudio.Click += (_, _) => SetCopyAudio(!copyAudio);
+
+        SetMode(false);
     }
 
-    public void SetExplanation(bool exact)
+    public ExactExportOptions ExactOptions => new(quality, copyAudio);
+
+    public event EventHandler? ExactOptionsChanged;
+
+    public void SetMode(bool exact)
     {
-        Explanation.Text = ExportModeCopy.Explanation(exact);
-        Explanation.AccessibleName = Explanation.Text;
+        exactMode = exact;
         Fast.Selected = !exact;
         Exact.Selected = exact;
+        QualityHigh.Visible = exact;
+        QualityBalanced.Visible = exact;
+        QualitySmall.Visible = exact;
+        CopyAudio.Visible = exact;
+        SyncExactSelection();
+        RefreshExplanation();
+        PerformLayout();
+    }
+
+    public void SetExactOptionsEnabled(bool enabled)
+    {
+        QualityHigh.Enabled = enabled;
+        QualityBalanced.Enabled = enabled;
+        QualitySmall.Enabled = enabled;
+        CopyAudio.Enabled = enabled;
+    }
+
+    public int MeasureHeight(bool narrowLayout)
+    {
+        var gap = LogicalToDeviceUnits(8);
+        var explanation = LogicalToDeviceUnits(32);
+        if (!narrowLayout)
+        {
+            var height = LogicalToDeviceUnits(40) + LogicalToDeviceUnits(4) + explanation;
+            if (exactMode) height += gap + LogicalToDeviceUnits(32);
+            return height;
+        }
+
+        var heightNarrow = LogicalToDeviceUnits(36) + gap + LogicalToDeviceUnits(36) + gap + LogicalToDeviceUnits(36) + LogicalToDeviceUnits(4) + explanation;
+        if (exactMode) heightNarrow += gap + LogicalToDeviceUnits(32);
+        return heightNarrow;
     }
 
     public void Arrange(bool narrowLayout)
     {
         narrow = narrowLayout;
         PerformLayout();
+    }
+
+    void SetQuality(ExactQuality value)
+    {
+        if (!exactMode || quality == value) return;
+        quality = value;
+        SyncExactSelection();
+        RefreshExplanation();
+        ExactOptionsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    void SetCopyAudio(bool value)
+    {
+        if (!exactMode || copyAudio == value) return;
+        copyAudio = value;
+        SyncExactSelection();
+        RefreshExplanation();
+        ExactOptionsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    void SyncExactSelection()
+    {
+        QualityHigh.Selected = quality == ExactQuality.High;
+        QualityBalanced.Selected = quality == ExactQuality.Balanced;
+        QualitySmall.Selected = quality == ExactQuality.Small;
+        CopyAudio.Selected = copyAudio;
+        CopyAudio.AccessibleDescription = ExactExportPresets.AudioHint(copyAudio);
+    }
+
+    void RefreshExplanation()
+    {
+        Explanation.Text = ExportModeCopy.Explanation(exactMode, ExactOptions);
+        Explanation.AccessibleName = Explanation.Text;
     }
 
     protected override void OnLayout(LayoutEventArgs levent)
@@ -614,6 +703,7 @@ sealed class ExportBar : Panel
         var buttonWidth = LogicalToDeviceUnits(132);
         var cancelWidth = LogicalToDeviceUnits(96);
         var buttonHeight = LogicalToDeviceUnits(36);
+        var optionsHeight = LogicalToDeviceUnits(32);
         if (!narrow)
         {
             var rowHeight = LogicalToDeviceUnits(40);
@@ -629,17 +719,41 @@ sealed class ExportBar : Panel
             var cardWidth = Math.Max(40, (right - gap) / 2);
             Fast.SetBounds(0, 0, cardWidth, rowHeight);
             Exact.SetBounds(cardWidth + gap, 0, Math.Max(40, right - cardWidth - gap), rowHeight);
-            Explanation.SetBounds(0, rowHeight + LogicalToDeviceUnits(4), ClientSize.Width, Math.Max(0, ClientSize.Height - rowHeight - LogicalToDeviceUnits(4)));
+            var y = rowHeight + LogicalToDeviceUnits(4);
+            if (exactMode)
+            {
+                LayoutExactOptions(0, y, ClientSize.Width, optionsHeight, gap);
+                y += optionsHeight + gap;
+            }
+
+            Explanation.SetBounds(0, y, ClientSize.Width, Math.Max(0, ClientSize.Height - y));
             return;
         }
 
         var cardHeight = LogicalToDeviceUnits(36);
         Fast.SetBounds(0, 0, ClientSize.Width, cardHeight);
         Exact.SetBounds(0, cardHeight + gap, ClientSize.Width, cardHeight);
-        var y = Exact.Bottom + gap;
-        Export.SetBounds(Math.Max(0, ClientSize.Width - buttonWidth), y, buttonWidth, buttonHeight);
-        Cancel.SetBounds(Math.Max(0, Export.Left - gap - cancelWidth), y, cancelWidth, buttonHeight);
-        y = Export.Bottom + LogicalToDeviceUnits(4);
-        Explanation.SetBounds(0, y, ClientSize.Width, Math.Max(0, ClientSize.Height - y));
+        var row = Exact.Bottom + gap;
+        Export.SetBounds(Math.Max(0, ClientSize.Width - buttonWidth), row, buttonWidth, buttonHeight);
+        Cancel.SetBounds(Math.Max(0, Export.Left - gap - cancelWidth), row, cancelWidth, buttonHeight);
+        row = Export.Bottom + LogicalToDeviceUnits(4);
+        if (exactMode)
+        {
+            LayoutExactOptions(0, row, ClientSize.Width, optionsHeight, gap);
+            row += optionsHeight + gap;
+        }
+
+        Explanation.SetBounds(0, row, ClientSize.Width, Math.Max(0, ClientSize.Height - row));
+    }
+
+    void LayoutExactOptions(int x, int y, int width, int height, int gap)
+    {
+        var audioWidth = LogicalToDeviceUnits(120);
+        var qualityWidth = Math.Max(40, width - audioWidth - gap);
+        var cell = Math.Max(40, (qualityWidth - gap * 2) / 3);
+        QualityHigh.SetBounds(x, y, cell, height);
+        QualityBalanced.SetBounds(QualityHigh.Right + gap, y, cell, height);
+        QualitySmall.SetBounds(QualityBalanced.Right + gap, y, Math.Max(40, qualityWidth - cell * 2 - gap * 2), height);
+        CopyAudio.SetBounds(x + qualityWidth + gap, y, Math.Max(40, width - qualityWidth - gap), height);
     }
 }

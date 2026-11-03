@@ -7,7 +7,10 @@ internal static class Program
     {
         if (args is ["--check"])
         {
-            var errors = TimeMath.SelfCheck();
+            var errors = TimeMath.SelfCheck()
+                .Concat(FrameCache.SelfCheck())
+                .Concat(ExportService.SelfCheck())
+                .ToList();
             var path = Path.Combine(Path.GetTempPath(), "vt-check.txt");
             File.WriteAllLines(path, errors.Count == 0 ? ["ok"] : errors);
             Environment.Exit(errors.Count == 0 ? 0 : 1);

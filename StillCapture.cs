@@ -67,6 +67,13 @@ sealed class StillCapture
     }
 }
 
+/// <summary>
+/// LRU cache of preview stills. Ownership rules:
+/// - <see cref="Put"/> takes ownership of the bitmap (or disposes it if unused).
+/// - Call <see cref="SetShown"/> with the bitmap currently in the preview PictureBox
+///   so replace/trim will not dispose that live image.
+/// - Clear the PictureBox, call <see cref="SetShown"/>(null), then <see cref="Clear"/> when unloading.
+/// </summary>
 sealed class FrameCache
 {
     const int Limit = 24;
@@ -81,6 +88,9 @@ sealed class FrameCache
 
     readonly Dictionary<Key, Slot> slots = new();
     readonly Queue<Key> order = new();
+    Bitmap? shown;
+
+    public void SetShown(Bitmap? bitmap) => shown = bitmap;
 
     public bool TryGet(long frame, int width, bool accurate, out Bitmap? bitmap)
     {
@@ -96,7 +106,7 @@ sealed class FrameCache
         return bitmap is not null;
     }
 
-    public void Put(long frame, int width, Bitmap bitmap, bool accurate, Bitmap? shown)
+    public void Put(long frame, int width, Bitmap bitmap, bool accurate)
     {
         var key = new Key(frame, width);
         if (!slots.TryGetValue(key, out var slot))
@@ -107,37 +117,36 @@ sealed class FrameCache
         }
 
         if (accurate)
-            Replace(slot, true, bitmap, shown);
+            Replace(slot, true, bitmap);
         else if (slot.Accurate is null)
-            Replace(slot, false, bitmap, shown);
+            Replace(slot, false, bitmap);
         else
             bitmap.Dispose();
 
-        Trim(shown);
+        Trim();
     }
 
     public void Clear()
     {
         foreach (var slot in slots.Values)
         {
-            slot.Fast?.Dispose();
-            slot.Accurate?.Dispose();
+            DisposeUnlessShown(slot.Fast);
+            DisposeUnlessShown(slot.Accurate);
         }
 
         slots.Clear();
         order.Clear();
     }
 
-    static void Replace(Slot slot, bool accurate, Bitmap bitmap, Bitmap? shown)
+    void Replace(Slot slot, bool accurate, Bitmap bitmap)
     {
         var previous = accurate ? slot.Accurate : slot.Fast;
         if (accurate) slot.Accurate = bitmap;
         else slot.Fast = bitmap;
-        if (previous is not null && previous != bitmap && previous != shown)
-            previous.Dispose();
+        DisposeUnlessShown(previous, bitmap);
     }
 
-    void Trim(Bitmap? shown)
+    void Trim()
     {
         var guard = 0;
         while (order.Count > Limit && guard++ < order.Count + 2)
@@ -154,6 +163,55 @@ sealed class FrameCache
             slot.Fast?.Dispose();
             slot.Accurate?.Dispose();
             slots.Remove(key);
+        }
+    }
+
+    void DisposeUnlessShown(Bitmap? bitmap, Bitmap? incoming = null)
+    {
+        if (bitmap is null || bitmap == shown || bitmap == incoming) return;
+        bitmap.Dispose();
+    }
+
+    public static IReadOnlyList<string> SelfCheck()
+    {
+        var errors = new List<string>();
+        void Expect(bool condition, string message)
+        {
+            if (!condition) errors.Add(message);
+        }
+
+        var cache = new FrameCache();
+        var live = new Bitmap(2, 2);
+        cache.SetShown(live);
+        cache.Put(0, 320, live, accurate: false);
+
+        for (var i = 1; i <= Limit + 4; i++)
+            cache.Put(i, 320, new Bitmap(1, 1), accurate: false);
+
+        Expect(Alive(live), "trim kept the shown bitmap");
+
+        var replacement = new Bitmap(2, 2);
+        cache.Put(0, 320, replacement, accurate: true);
+        Expect(Alive(live), "replace kept the shown bitmap");
+        Expect(Alive(replacement), "replacement stayed alive");
+
+        cache.SetShown(null);
+        cache.Clear();
+        Expect(!Alive(live), "clear disposed the unpinned former shown bitmap");
+        Expect(!Alive(replacement), "clear disposed cached bitmaps");
+        return errors;
+
+        static bool Alive(Bitmap bitmap)
+        {
+            try
+            {
+                _ = bitmap.GetPixel(0, 0);
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
     }
 }

@@ -46,7 +46,6 @@ public sealed class MainForm : Form
     bool disposed;
     int loadGeneration;
     int previewGeneration;
-    Bitmap? shown;
 
     public MainForm(string? startupPath)
     {
@@ -148,7 +147,11 @@ public sealed class MainForm : Form
         tips.SetToolTip(points.OutLater, "One frame later");
         tips.SetToolTip(timeline, "Drag the handles to trim. Drag the highlighted span to slide it. Click to move the playhead.");
         tips.SetToolTip(exportBar.Fast, ExportModeCopy.FastExplanation);
-        tips.SetToolTip(exportBar.Exact, ExportModeCopy.ExactExplanation);
+        tips.SetToolTip(exportBar.Exact, ExportModeCopy.ExactBaseExplanation);
+        tips.SetToolTip(exportBar.QualityHigh, ExactExportPresets.Hint(ExactQuality.High));
+        tips.SetToolTip(exportBar.QualityBalanced, ExactExportPresets.Hint(ExactQuality.Balanced));
+        tips.SetToolTip(exportBar.QualitySmall, ExactExportPresets.Hint(ExactQuality.Small));
+        tips.SetToolTip(exportBar.CopyAudio, "Keep the original audio instead of re-encoding to AAC.");
 
         WireDrop(this);
     }
@@ -305,9 +308,7 @@ public sealed class MainForm : Form
 
             var timelineHeight = S(148);
             var pointsHeight = S(34) + S(8) + S(34);
-            var exportHeight = narrowLayout
-                ? S(36) + S(8) + S(36) + S(8) + S(36) + S(4) + S(32)
-                : S(40) + S(4) + S(36);
+            var exportHeight = exportBar.MeasureHeight(narrowLayout);
             var bottomHeight = S(12) + timelineHeight + S(8) + pointsHeight + S(8) + exportHeight + S(12);
             var chrome = statusBar.Height + (toolbar.Visible ? toolbar.Height : 0);
             var previewRoom = ClientSize.Height - chrome - (bottom.Visible ? bottomHeight : 0);
@@ -540,7 +541,8 @@ public sealed class MainForm : Form
     {
         if (exporting) return;
         exact = value;
-        exportBar.SetExplanation(value);
+        exportBar.SetMode(value);
+        LayoutChrome();
     }
 
     void SchedulePreview(bool accurate)
@@ -603,14 +605,14 @@ public sealed class MainForm : Form
         }
 
         ShowPreview(bitmap);
-        stills.Cache.Put(frame, width, bitmap, accurate, shown);
+        stills.Cache.Put(frame, width, bitmap, accurate);
     }
 
     void ShowPreview(Bitmap bitmap)
     {
         if (IsDisposed) return;
-        shown = bitmap;
         preview.Image = bitmap;
+        stills.Cache.SetShown(bitmap);
     }
 
     int PreviewWidth()
@@ -676,7 +678,7 @@ public sealed class MainForm : Form
     void ClearPictures()
     {
         preview.Image = null;
-        shown = null;
+        stills.Cache.SetShown(null);
         stills.Clear();
         filmstrip.Clear(timeline);
     }
@@ -714,11 +716,13 @@ public sealed class MainForm : Form
         exportBar.Cancel.Visible = true;
         exportBar.Fast.Enabled = false;
         exportBar.Exact.Enabled = false;
+        exportBar.SetExactOptionsEnabled(false);
         statusBar.Progress.Fraction = 0;
         statusBar.Progress.Visible = true;
         statusBar.PerformLayout();
-        exportBar.Arrange(narrowLayout);
+        LayoutChrome();
         SetStatus(mode + "…", StatusKind.Busy);
+        var exactOptions = exportBar.ExactOptions;
         try
         {
             var progress = new Progress<TimeSpan>(elapsed =>
@@ -729,7 +733,7 @@ public sealed class MainForm : Form
                 statusBar.Progress.Fraction = fraction;
                 SetStatus($"{mode}… {(int)Math.Round(fraction * 100)}%", StatusKind.Busy);
             });
-            var args = ExportService.BuildArguments(input, output, timeline.InSeconds, timeline.OutSeconds, exact);
+            var args = ExportService.BuildArguments(input, output, timeline.InSeconds, timeline.OutSeconds, exact, exactOptions);
             await runner.RunAsync(runner.Ffmpeg, args, token, progress);
             SetStatus("Saved: " + output, StatusKind.Good);
         }
@@ -753,9 +757,10 @@ public sealed class MainForm : Form
                 exportBar.Cancel.Visible = false;
                 exportBar.Fast.Enabled = true;
                 exportBar.Exact.Enabled = true;
+                exportBar.SetExactOptionsEnabled(true);
                 statusBar.Progress.Visible = false;
                 statusBar.PerformLayout();
-                exportBar.Arrange(narrowLayout);
+                LayoutChrome();
             }
         }
     }

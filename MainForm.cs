@@ -122,7 +122,7 @@ public sealed class MainForm : Form
 
         toolbar.Open.Click += (_, _) => Browse();
         timeline.ValuesChanged += (_, _) => OnTimelineChanged();
-        timeline.InteractionEnded += (_, _) => SchedulePreview(accurate: true);
+        timeline.InteractionEnded += (_, _) => OnTimelineInteractionEnded();
         preview.MouseWheel += OnWheel;
 
         points.SetIn.Click += (_, _) => timeline.SetInToPlayhead();
@@ -192,10 +192,10 @@ public sealed class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        loadCts.Cancel();
-        previewCts.Cancel();
-        filmCts.Cancel();
-        exportCts.Cancel();
+        TryCancel(loadCts);
+        TryCancel(previewCts);
+        TryCancel(filmCts);
+        TryCancel(exportCts);
         base.OnFormClosing(e);
     }
 
@@ -204,10 +204,10 @@ public sealed class MainForm : Form
         if (disposing && !disposed)
         {
             disposed = true;
-            loadCts.Cancel();
-            previewCts.Cancel();
-            filmCts.Cancel();
-            exportCts.Cancel();
+            CancelAndDispose(loadCts);
+            CancelAndDispose(previewCts);
+            CancelAndDispose(filmCts);
+            CancelAndDispose(exportCts);
             previewTimer.Stop();
             accurateTimer.Stop();
             filmTimer.Stop();
@@ -404,14 +404,19 @@ public sealed class MainForm : Form
             return;
         }
 
-        loadCts.Cancel();
-        loadCts = new CancellationTokenSource();
+        ReplaceCts(ref loadCts);
         var token = loadCts.Token;
         var generation = ++loadGeneration;
         SetStatus("Reading metadata…", StatusKind.Busy);
         try
         {
-            var json = await runner.RunAsync(runner.Ffprobe, "-v quiet -print_format json -show_streams -show_format " + FfmpegRunner.Quote(path), token);
+            var json = await runner.RunAsync(runner.Ffprobe, [
+                "-v", "quiet",
+                "-print_format", "json",
+                "-show_streams",
+                "-show_format",
+                path,
+            ], token);
             if (generation != loadGeneration || IsDisposed) return;
             var media = ParseProbe(json);
             ApplyMedia(path, media.Duration, media.Fps, media.Frames);
@@ -483,9 +488,16 @@ public sealed class MainForm : Form
 
     void OnTimelineChanged()
     {
-        if (!syncing) WriteBoxes();
+        // Skip text-box churn while dragging; InteractionEnded writes the final values.
+        if (!syncing && !timeline.IsDragging) WriteBoxes();
         UpdateReadouts();
         SchedulePreview(false);
+    }
+
+    void OnTimelineInteractionEnded()
+    {
+        if (!syncing) WriteBoxes();
+        SchedulePreview(accurate: true);
     }
 
     void UpdateReadouts()
@@ -603,20 +615,19 @@ public sealed class MainForm : Form
     async Task GrabPreviewAsync(long frame, bool accurate)
     {
         if (!timeline.HasMedia || runner.Ffmpeg is null || input is null || IsDisposed) return;
-        if (frameCache.TryGet(frame, accurate, out var cached) && cached is not null)
+        var width = PreviewWidth();
+        if (frameCache.TryGet(frame, width, accurate, out var cached) && cached is not null)
         {
             ShowPreview(cached);
             return;
         }
 
-        previewCts.Cancel();
-        previewCts = new CancellationTokenSource();
+        ReplaceCts(ref previewCts);
         var token = previewCts.Token;
         var generation = ++previewGeneration;
         Bitmap? bitmap = null;
         try
         {
-            var width = PreviewWidth();
             bitmap = await CaptureStillAsync(timeline.SeekTime(frame), accurate, "scale=" + width + ":-2", accurate ? 2 : 3, token);
         }
         catch (OperationCanceledException)
@@ -631,7 +642,7 @@ public sealed class MainForm : Form
         }
 
         ShowPreview(bitmap);
-        frameCache.Put(frame, bitmap, accurate, bitmap);
+        frameCache.Put(frame, width, bitmap, accurate, shown);
     }
 
     void ShowPreview(Bitmap bitmap)
@@ -681,8 +692,7 @@ public sealed class MainForm : Form
             return;
         }
 
-        filmCts.Cancel();
-        filmCts = new CancellationTokenSource();
+        ReplaceCts(ref filmCts);
         var generation = ++filmGeneration;
         buildingCount = count;
         _ = BuildFilmstripAsync(count, generation, filmCts.Token);
@@ -722,7 +732,7 @@ public sealed class MainForm : Form
             return;
         }
 
-        filmCache[count] = slots;
+        KeepStrip(count, slots);
         currentStripCount = count;
         buildingCount = 0;
         var any = false;
@@ -759,7 +769,9 @@ public sealed class MainForm : Form
 
                     slots[index] = bitmap;
                     filled++;
-                    timeline.Invalidate();
+                    // Paint in batches so a 32-thumb strip does not redraw on every slot.
+                    if (filled == count || (filled & 3) == 0)
+                        timeline.Invalidate();
                     if (!exporting)
                         SetStatus($"Building the filmstrip… {filled}/{count}", StatusKind.Busy);
                 }
@@ -795,6 +807,22 @@ public sealed class MainForm : Form
         timeline.UseStrip(slots);
     }
 
+    void KeepStrip(int count, Bitmap?[] slots)
+    {
+        foreach (var key in filmCache.Keys.ToArray())
+        {
+            if (key == count) continue;
+            var old = filmCache[key];
+            filmCache.Remove(key);
+            if (old != displayedStrip && old != slots)
+                ReleaseStrip(old);
+        }
+
+        if (filmCache.TryGetValue(count, out var existing) && existing != slots && existing != displayedStrip)
+            ReleaseStrip(existing);
+        filmCache[count] = slots;
+    }
+
     void ReleaseStrip(Bitmap?[]? slots)
     {
         if (slots is null || !releasedStrips.Add(slots)) return;
@@ -805,19 +833,38 @@ public sealed class MainForm : Form
     async Task<Bitmap?> CaptureStillAsync(double seconds, bool accurate, string filter, int quality, CancellationToken token)
     {
         if (runner.Ffmpeg is null || input is null) return null;
-        var temp = Path.Combine(Path.GetTempPath(), "vt_" + Guid.NewGuid().ToString("n") + ".jpg");
         var time = Math.Clamp(seconds, 0, Math.Max(0, duration - 0.001)).ToString("0.######", CultureInfo.InvariantCulture);
-        var source = FfmpegRunner.Quote(input);
-        var target = FfmpegRunner.Quote(temp);
-        // Accurate grabs decode up to the requested time. Fast grabs jump to the nearest keyframe.
-        var args = accurate
-            ? $"-nostdin -hide_banner -loglevel error -y -i {source} -ss {time} -frames:v 1 -vf {filter} -q:v {quality} {target}"
-            : $"-nostdin -hide_banner -loglevel error -y -ss {time} -i {source} -frames:v 1 -vf {filter} -q:v {quality} {target}";
+        // Pipe JPEG to stdout so stills skip temp files. Accurate seeks after -i; fast seeks before.
+        string[] args = accurate
+            ?
+            [
+                "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", input,
+                "-ss", time,
+                "-frames:v", "1",
+                "-vf", filter,
+                "-q:v", quality.ToString(CultureInfo.InvariantCulture),
+                "-f", "image2pipe",
+                "-vcodec", "mjpeg",
+                "pipe:1",
+            ]
+            :
+            [
+                "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-ss", time,
+                "-i", input,
+                "-frames:v", "1",
+                "-vf", filter,
+                "-q:v", quality.ToString(CultureInfo.InvariantCulture),
+                "-f", "image2pipe",
+                "-vcodec", "mjpeg",
+                "pipe:1",
+            ];
         try
         {
-            await runner.RunAsync(runner.Ffmpeg, args, token);
-            if (token.IsCancellationRequested || !File.Exists(temp)) return null;
-            return CopyBitmap(temp);
+            var bytes = await runner.RunBinaryAsync(runner.Ffmpeg, args, token);
+            if (token.IsCancellationRequested || bytes.Length == 0) return null;
+            return BitmapFromJpeg(bytes);
         }
         catch (OperationCanceledException)
         {
@@ -827,18 +874,12 @@ public sealed class MainForm : Form
         {
             return null;
         }
-        finally
-        {
-            TryDelete(temp);
-        }
     }
 
     void CancelPreviewJobs()
     {
-        previewCts.Cancel();
-        previewCts = new CancellationTokenSource();
-        filmCts.Cancel();
-        filmCts = new CancellationTokenSource();
+        ReplaceCts(ref previewCts);
+        ReplaceCts(ref filmCts);
         previewGeneration++;
         filmGeneration++;
         buildingCount = 0;
@@ -861,6 +902,7 @@ public sealed class MainForm : Form
         currentStripCount = 0;
         foreach (var slots in doomed)
             ReleaseStrip(slots);
+        releasedStrips.Clear();
     }
 
     async void Export()
@@ -886,8 +928,7 @@ public sealed class MainForm : Form
             return;
         }
 
-        exportCts.Cancel();
-        exportCts = new CancellationTokenSource();
+        ReplaceCts(ref exportCts);
         var token = exportCts.Token;
         var mode = exact ? "Encoding exact frames" : "Saving fast copy";
         exporting = true;
@@ -948,16 +989,54 @@ public sealed class MainForm : Form
         exportCts.Cancel();
     }
 
-    string BuildExportArguments(string output)
+    string[] BuildExportArguments(string output)
     {
         var start = timeline.InSeconds.ToString(CultureInfo.InvariantCulture);
         var length = (timeline.OutSeconds - timeline.InSeconds).ToString(CultureInfo.InvariantCulture);
-        var source = FfmpegRunner.Quote(input!);
-        var target = FfmpegRunner.Quote(output);
         // Exact mode seeks after -i so the cut lands on the chosen frames. Fast copy seeks before -i.
         return exact
-            ? $"-y -progress pipe:1 -nostats -i {source} -ss {start} -t {length} -map 0 -c:v libx264 -c:a aac {target}"
-            : $"-y -progress pipe:1 -nostats -ss {start} -i {source} -t {length} -map 0 -c copy -avoid_negative_ts make_zero {target}";
+            ?
+            [
+                "-y", "-progress", "pipe:1", "-nostats",
+                "-i", input!,
+                "-ss", start,
+                "-t", length,
+                "-map", "0",
+                "-c:v", "libx264",
+                "-c:a", "aac",
+                output,
+            ]
+            :
+            [
+                "-y", "-progress", "pipe:1", "-nostats",
+                "-ss", start,
+                "-i", input!,
+                "-t", length,
+                "-map", "0",
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                output,
+            ];
+    }
+
+    static void ReplaceCts(ref CancellationTokenSource cts)
+    {
+        var previous = cts;
+        cts = new CancellationTokenSource();
+        CancelAndDispose(previous);
+    }
+
+    static void TryCancel(CancellationTokenSource cts)
+    {
+        try { cts.Cancel(); }
+        catch (ObjectDisposedException) { }
+    }
+
+    static void CancelAndDispose(CancellationTokenSource cts)
+    {
+        TryCancel(cts);
+        try { cts.Dispose(); }
+        catch (ObjectDisposedException) { }
     }
 
     void SetStatus(string text, StatusKind kind)
@@ -975,9 +1054,10 @@ public sealed class MainForm : Form
 
     int S(int logical) => LogicalToDeviceUnits(logical);
 
-    static Bitmap CopyBitmap(string path)
+    static Bitmap? BitmapFromJpeg(byte[] bytes)
     {
-        using var image = new Bitmap(path);
+        using var stream = new MemoryStream(bytes);
+        using var image = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: false);
         return new Bitmap(image);
     }
 
@@ -1000,19 +1080,21 @@ sealed class FrameCache
 {
     const int Limit = 24;
 
+    readonly record struct Key(long Frame, int Width);
+
     sealed class Slot
     {
         public Bitmap? Fast;
         public Bitmap? Accurate;
     }
 
-    readonly Dictionary<long, Slot> slots = new();
-    readonly Queue<long> order = new();
+    readonly Dictionary<Key, Slot> slots = new();
+    readonly Queue<Key> order = new();
 
-    public bool TryGet(long frame, bool accurate, out Bitmap? bitmap)
+    public bool TryGet(long frame, int width, bool accurate, out Bitmap? bitmap)
     {
         bitmap = null;
-        if (!slots.TryGetValue(frame, out var slot)) return false;
+        if (!slots.TryGetValue(new Key(frame, width), out var slot)) return false;
         if (accurate)
         {
             bitmap = slot.Accurate;
@@ -1023,13 +1105,14 @@ sealed class FrameCache
         return bitmap is not null;
     }
 
-    public void Put(long frame, Bitmap bitmap, bool accurate, Bitmap? shown)
+    public void Put(long frame, int width, Bitmap bitmap, bool accurate, Bitmap? shown)
     {
-        if (!slots.TryGetValue(frame, out var slot))
+        var key = new Key(frame, width);
+        if (!slots.TryGetValue(key, out var slot))
         {
             slot = new Slot();
-            slots[frame] = slot;
-            order.Enqueue(frame);
+            slots[key] = slot;
+            order.Enqueue(key);
         }
 
         if (accurate)
@@ -1068,18 +1151,18 @@ sealed class FrameCache
         var guard = 0;
         while (order.Count > Limit && guard++ < order.Count + 2)
         {
-            var frame = order.Dequeue();
-            if (!slots.TryGetValue(frame, out var slot)) continue;
+            var key = order.Dequeue();
+            if (!slots.TryGetValue(key, out var slot)) continue;
             var visible = slot.Fast == shown || slot.Accurate == shown;
             if (visible)
             {
-                order.Enqueue(frame);
+                order.Enqueue(key);
                 continue;
             }
 
             slot.Fast?.Dispose();
             slot.Accurate?.Dispose();
-            slots.Remove(frame);
+            slots.Remove(key);
         }
     }
 }

@@ -15,24 +15,9 @@ sealed class FfmpegRunner
         Ffprobe = Find("ffprobe.exe");
     }
 
-    public static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";
-
-    public async Task<string> RunAsync(string executable, string arguments, CancellationToken cancellationToken = default, IProgress<TimeSpan>? progress = null)
+    public async Task<string> RunAsync(string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken = default, IProgress<TimeSpan>? progress = null)
     {
-        using var process = new Process();
-        process.StartInfo = new ProcessStartInfo(executable, arguments)
-        {
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-        };
-
-        if (!process.Start())
-            throw new InvalidOperationException("Could not start " + Path.GetFileName(executable) + ".");
-
+        using var process = Start(executable, arguments, binaryStdout: false);
         var stderrTask = process.StandardError.ReadToEndAsync();
         var stdout = new StringBuilder();
         string stderr = "";
@@ -60,6 +45,64 @@ sealed class FfmpegRunner
             try { stderr = await stderrTask.ConfigureAwait(false); } catch { /* The pipe closes when the process is killed. */ }
         }
 
+        EnsureSuccess(process, stderr, cancellationToken);
+        return stdout.ToString();
+    }
+
+    public async Task<byte[]> RunBinaryAsync(string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken = default)
+    {
+        using var process = Start(executable, arguments, binaryStdout: true);
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        using var buffer = new MemoryStream();
+        string stderr = "";
+        try
+        {
+            await CopyAsync(process.StandardOutput.BaseStream, buffer, cancellationToken).ConfigureAwait(false);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            TryKill(process);
+            throw;
+        }
+        finally
+        {
+            try { stderr = await stderrTask.ConfigureAwait(false); } catch { /* The pipe closes when the process is killed. */ }
+        }
+
+        EnsureSuccess(process, stderr, cancellationToken);
+        return buffer.ToArray();
+    }
+
+    static Process Start(string executable, IReadOnlyList<string> arguments, bool binaryStdout)
+    {
+        var process = new Process();
+        var start = new ProcessStartInfo
+        {
+            FileName = executable,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardErrorEncoding = Encoding.UTF8,
+        };
+        foreach (var argument in arguments)
+            start.ArgumentList.Add(argument);
+        if (!binaryStdout)
+            start.StandardOutputEncoding = Encoding.UTF8;
+        process.StartInfo = start;
+
+        if (!process.Start())
+        {
+            process.Dispose();
+            throw new InvalidOperationException("Could not start " + Path.GetFileName(executable) + ".");
+        }
+
+        return process;
+    }
+
+    static void EnsureSuccess(Process process, string stderr, CancellationToken cancellationToken)
+    {
         if (cancellationToken.IsCancellationRequested)
         {
             TryKill(process);
@@ -68,8 +111,18 @@ sealed class FfmpegRunner
 
         if (process.ExitCode != 0)
             throw new InvalidOperationException(LastLine(stderr) ?? "FFmpeg failed.");
+    }
 
-        return stdout.ToString();
+    static async Task CopyAsync(Stream source, Stream destination, CancellationToken cancellationToken)
+    {
+        var block = new byte[81920];
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var read = await source.ReadAsync(block.AsMemory(0, block.Length), cancellationToken).ConfigureAwait(false);
+            if (read == 0) break;
+            await destination.WriteAsync(block.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+        }
     }
 
     static string? Find(string name)

@@ -9,6 +9,10 @@
 - Accept a video path on the command line at startup. Added a `--check` self-test for timecode and frame math.
 - Enabled Per-Monitor V2 high-DPI awareness.
 - Updated the README feature and control docs to match the current UI.
+- Still capture pipes JPEG from FFmpeg to memory (no temp files). Preview cache keys include frame width.
+- Filmstrip cache keeps only the current strip size and clears release tracking on media change.
+- Timeline paint uses bilinear scaling, cached brushes/pens, source-crop draws without per-slot clipping, and batched invalidates while thumbs load.
+- Dispose replaced cancellation sources; skip in/out text-box writes while dragging the timeline; launch FFmpeg/FFprobe with `ArgumentList` instead of quoted argument strings.
 
 ## 2026-10-19
 

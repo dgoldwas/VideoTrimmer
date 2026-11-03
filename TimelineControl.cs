@@ -8,6 +8,15 @@ sealed class TimelineControl : Control
     enum DragKind { None, Playhead, InHandle, OutHandle, Span }
     enum HitKind { None, InHandle, OutHandle, Selection, Film }
 
+    static readonly SolidBrush SurfaceBrush = new(Theme.Surface);
+    static readonly SolidBrush DimBrush = new(Color.FromArgb(150, 16, 18, 22));
+    static readonly SolidBrush TagBackgroundBrush = new(Color.FromArgb(210, 16, 18, 22));
+    static readonly SolidBrush PlayheadBrush = new(Theme.Text);
+    static readonly SolidBrush GripBrush = new(Color.FromArgb(180, 16, 18, 22));
+    static readonly Pen BorderPen = new(Theme.Border);
+    static readonly Pen SelectionPen = new(Theme.Accent, 2);
+    static readonly Pen PlayheadPen = new(Theme.Text, 2);
+
     Bitmap?[]? strip;
     double duration;
     double fps;
@@ -34,6 +43,7 @@ sealed class TimelineControl : Control
 
     public bool HasMedia => totalFrames > 0 && fps > 0 && duration > 0;
     public bool HasFrames => strip is { Length: > 0 };
+    public bool IsDragging => drag != DragKind.None;
     public bool Locked { get; set; }
     public string Placeholder { get; set; } = "";
     public double Fps => fps;
@@ -180,26 +190,22 @@ sealed class TimelineControl : Control
         var g = e.Graphics;
         g.Clear(Theme.Background);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        // Bilinear is enough for filmstrip thumbs and much cheaper than HighQualityBicubic.
+        g.InterpolationMode = InterpolationMode.Bilinear;
+        g.PixelOffsetMode = PixelOffsetMode.Half;
         var film = FilmRect();
-        using (var surface = new SolidBrush(Theme.Surface))
-            g.FillRectangle(surface, film);
+        g.FillRectangle(SurfaceBrush, film);
 
         if (strip is { Length: > 0 })
         {
             var slotWidth = film.Width / (float)strip.Length;
-            var previous = g.Save();
             for (var i = 0; i < strip.Length; i++)
             {
-                var slot = new RectangleF(film.Left + i * slotWidth, film.Top, slotWidth + 1, film.Height);
                 var image = strip[i];
                 if (image is null) continue;
-                g.SetClip(Rectangle.Round(slot));
-                g.DrawImage(image, Cover(image.Size, slot));
+                var slot = new RectangleF(film.Left + i * slotWidth, film.Top, slotWidth + 1, film.Height);
+                DrawCover(g, image, slot);
             }
-
-            g.Restore(previous);
         }
         else if (!string.IsNullOrWhiteSpace(Placeholder))
         {
@@ -215,19 +221,13 @@ sealed class TimelineControl : Control
 
         var inX = XOf(inFrame);
         var outX = XOf(outFrame);
-        using (var dim = new SolidBrush(Color.FromArgb(150, 16, 18, 22)))
-        {
-            if (inX > film.Left)
-                g.FillRectangle(dim, film.Left, film.Top, inX - film.Left, film.Height);
-            if (outX < film.Right)
-                g.FillRectangle(dim, outX, film.Top, film.Right - outX, film.Height);
-        }
+        if (inX > film.Left)
+            g.FillRectangle(DimBrush, film.Left, film.Top, inX - film.Left, film.Height);
+        if (outX < film.Right)
+            g.FillRectangle(DimBrush, outX, film.Top, film.Right - outX, film.Height);
 
         if (outX > inX)
-        {
-            using var selection = new Pen(Theme.Accent, 2);
-            g.DrawRectangle(selection, inX, film.Top + 1, outX - inX, film.Height - 3);
-        }
+            g.DrawRectangle(SelectionPen, inX, film.Top + 1, outX - inX, film.Height - 3);
 
         DrawHandle(g, inX, film, Theme.InPoint);
         DrawHandle(g, outX, film, Theme.OutPoint);
@@ -437,20 +437,17 @@ sealed class TimelineControl : Control
         var rect = new Rectangle(x - width / 2, film.Top, width, film.Height);
         using var brush = new SolidBrush(color);
         graphics.FillRectangle(brush, rect);
-        using var grip = new SolidBrush(Color.FromArgb(180, 16, 18, 22));
         var middle = film.Top + film.Height / 2;
         var gap = LogicalToDeviceUnits(5);
         for (var i = -1; i <= 1; i++)
-            graphics.FillEllipse(grip, x - 2, middle + i * gap - 2, 4, 4);
+            graphics.FillEllipse(GripBrush, x - 2, middle + i * gap - 2, 4, 4);
     }
 
     static void DrawPlayhead(Graphics graphics, int x, Rectangle film)
     {
-        using var brush = new SolidBrush(Theme.Text);
         Point[] head = [new Point(x - 6, film.Top), new Point(x + 6, film.Top), new Point(x, film.Top + 9)];
-        graphics.FillPolygon(brush, head);
-        using var pen = new Pen(Theme.Text, 2);
-        graphics.DrawLine(pen, x, film.Top, x, film.Bottom);
+        graphics.FillPolygon(PlayheadBrush, head);
+        graphics.DrawLine(PlayheadPen, x, film.Top, x, film.Bottom);
     }
 
     void DrawRangeTags(Graphics graphics, Rectangle film, int inX, int outX)
@@ -510,24 +507,23 @@ sealed class TimelineControl : Control
     static void DrawTagAt(Graphics graphics, string text, int left, int top, Size size, Color color)
     {
         var rect = new Rectangle(left, top, size.Width, size.Height);
-        using var background = new SolidBrush(Color.FromArgb(210, 16, 18, 22));
-        graphics.FillRectangle(background, rect);
+        graphics.FillRectangle(TagBackgroundBrush, rect);
         TextRenderer.DrawText(graphics, text, Theme.Ui(8, FontStyle.Bold), rect, color,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
 
     static void DrawBorder(Graphics graphics, Rectangle film)
     {
-        using var pen = new Pen(Theme.Border);
-        graphics.DrawRectangle(pen, film.X, film.Y, film.Width - 1, film.Height - 1);
+        graphics.DrawRectangle(BorderPen, film.X, film.Y, film.Width - 1, film.Height - 1);
     }
 
-    static RectangleF Cover(Size image, RectangleF slot)
+    static void DrawCover(Graphics graphics, Image image, RectangleF slot)
     {
-        if (image.Width <= 0 || image.Height <= 0) return slot;
+        if (image.Width <= 0 || image.Height <= 0 || slot.Width <= 0 || slot.Height <= 0) return;
         var scale = Math.Max(slot.Width / image.Width, slot.Height / image.Height);
-        var width = image.Width * scale;
-        var height = image.Height * scale;
-        return new RectangleF(slot.X + (slot.Width - width) / 2, slot.Y + (slot.Height - height) / 2, width, height);
+        var srcWidth = slot.Width / scale;
+        var srcHeight = slot.Height / scale;
+        var src = new RectangleF((image.Width - srcWidth) / 2f, (image.Height - srcHeight) / 2f, srcWidth, srcHeight);
+        graphics.DrawImage(image, slot, src, GraphicsUnit.Pixel);
     }
 }

@@ -30,10 +30,11 @@ Requirements: Windows, the .NET 8 SDK, and FFmpeg/FFprobe available locally as d
 
 ```powershell
 dotnet build .\VideoTrimmer.csproj -c Release
-dotnet publish .\VideoTrimmer.csproj -c Release -r win-x64 --self-contained true
+dotnet publish .\VideoTrimmer.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o .\publish\win-x64
+Copy-Item .\tools\ffmpeg.exe, .\tools\ffprobe.exe .\publish\win-x64\ -Force
 ```
 
-The project targets `net8.0-windows` and requires Windows Forms. `dotnet publish` output is written under `bin\Release\net8.0-windows\win-x64\publish`. Place `ffmpeg.exe` and `ffprobe.exe` next to the published executable, or ensure they are on `PATH`.
+The project targets `net8.0-windows` and requires Windows Forms. The portable folder is `publish\win-x64\` (gitignored): a single-file `VideoTrimmer.exe` with `ffmpeg.exe` and `ffprobe.exe` beside it. FFmpeg can also live in a `tools` subfolder or on `PATH`.
 
 ## Trimming behavior
 

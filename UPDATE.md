@@ -27,4 +27,11 @@
 
 ## Packaging notes
 
-The current source targets Windows and .NET 8 WinForms. A published self-contained executable still requires FFmpeg and FFprobe alongside it or available on `PATH`. No installer or automated release workflow is included yet.
+The current source targets Windows and .NET 8 WinForms. The portable build is a self-contained single-file `win-x64` publish staged under `publish\win-x64\` with `ffmpeg.exe` and `ffprobe.exe` beside `VideoTrimmer.exe` (that folder is gitignored).
+
+```powershell
+dotnet publish .\VideoTrimmer.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o .\publish\win-x64
+Copy-Item .\tools\ffmpeg.exe, .\tools\ffprobe.exe .\publish\win-x64\ -Force
+```
+
+No installer or automated release workflow is included yet.

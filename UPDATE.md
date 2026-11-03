@@ -1,11 +1,21 @@
 # Updates
 
+## 2026-11-03
+
+- Refactored the app into focused modules: `Theme`, `TimeMath`, `TimelineControl`, `UiControls`, and `FfmpegRunner`.
+- Rebuilt the UI with a dark theme, custom controls, a filmstrip with in/out handles, and a preview that fills the free window space.
+- Added keyboard and mouse shortcuts for setting points, stepping frames, sliding the selection, and nudging edges.
+- Export shows progress and can be canceled. Fast-copy and exact-frame modes remain available.
+- Accept a video path on the command line at startup. Added a `--check` self-test for timecode and frame math.
+- Enabled Per-Monitor V2 high-DPI awareness.
+- Updated the README feature and control docs to match the current UI.
+
 ## 2026-10-19
 
 - Prepared the source project for the private GitHub repository.
 - Added repository and build documentation, plus ignore rules for generated output and the local sample clip.
 - Documented that FFmpeg and FFprobe are local runtime dependencies and are not stored in Git because each executable exceeds GitHub's 100 MB regular file limit.
-- The current app supports drag-and-drop or browse-to-open, timeline thumbnails, frame/timecode entry, stream-copy export, and an optional exact-frame re-encode mode.
+- The app supported drag-and-drop or browse-to-open, timeline thumbnails, frame/timecode entry, stream-copy export, and an optional exact-frame re-encode mode.
 
 ## Packaging notes
 

@@ -442,7 +442,7 @@ sealed class StatusBar : Panel
 {
     public Label Label { get; }
     public ThinProgress Progress { get; }
-    /// <summary>Shows the running version; becomes "Update to ..." when GitHub has a newer release.</summary>
+    /// <summary>Checks for updates; becomes "Update to ..." when GitHub has a newer release.</summary>
     public FlatButton UpdateButton { get; }
 
     public StatusBar()
@@ -456,7 +456,7 @@ sealed class StatusBar : Panel
             AccessibleName = "Status",
         };
         Progress = new ThinProgress { AccessibleName = "Export progress" };
-        UpdateButton = new FlatButton { Font = Theme.Ui(8.5f), TextColor = Theme.Muted, AccessibleName = "Check for updates", TabStop = false };
+        UpdateButton = new FlatButton { Font = Theme.Ui(8.5f), TextColor = Theme.Muted, AccessibleName = "Check for updates", TabStop = true };
         Controls.Add(Label);
         Controls.Add(Progress);
         Controls.Add(UpdateButton);

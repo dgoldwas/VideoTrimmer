@@ -46,7 +46,8 @@ static class UpdateService
         var tag = root.GetProperty("tag_name").GetString() ?? "";
         var version = tag.TrimStart('v', 'V');
         if (!IsNewer(version, currentVersion)) return null;
-        if (!root.TryGetProperty("assets", out var assets)) return null;
+        if (!root.TryGetProperty("assets", out var assets))
+            throw new InvalidDataException($"Release {version} has no installer.");
         foreach (var asset in assets.EnumerateArray())
         {
             var name = asset.GetProperty("name").GetString() ?? "";
@@ -61,7 +62,7 @@ static class UpdateService
                 asset.TryGetProperty("size", out var size) ? size.GetInt64() : 0, sha);
         }
 
-        return null;
+        throw new InvalidDataException($"Release {version} has no installer.");
     }
 
     /// <summary>Compares YYYY.MM.DD.## versions numerically, so 2026.11.09.10 is newer than 2026.11.09.09.</summary>
@@ -227,6 +228,12 @@ static class UpdateService
         var found = ParseLatestRelease(release, "2026.11.09.01");
         Expect(found is { Version: "2026.12.01.01", AssetApiUrl: "https://api/asset/2", Size: 42, Sha256: "abcd" }, "parse setup asset");
         Expect(ParseLatestRelease(release, "2026.12.01.01") is null, "no update when current");
+        try
+        {
+            ParseLatestRelease("{\"tag_name\":\"v2026.12.01.01\",\"assets\":[]}", "2026.11.09.01");
+            errors.Add("new release without installer must report an error");
+        }
+        catch (InvalidDataException) { }
         return errors;
     }
 }

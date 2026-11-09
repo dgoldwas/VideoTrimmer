@@ -1,5 +1,9 @@
 # Updates
 
+## 2026-11-09 (2026.11.09.05)
+
+- The status bar now has a clearly labeled **Check for updates** button, with keyboard access. A newer release without an installer is reported as an error instead of saying the app is up to date.
+
 ## 2026-11-09 (2026.11.09.04)
 
 - Multi-select in the Segments list: `Ctrl`+click, `Shift`+click, `Ctrl+A`, and `Esc` to clear. With two or more selected, Export saves only those, stitched or as separate files. The button reads **Export N selected…** and the list header shows the selected count and length.

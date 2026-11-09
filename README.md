@@ -33,7 +33,7 @@ To remove an ad break, for example: put the playhead where it starts and press `
 
 Run `VideoTrimmer-<version>-Setup.exe` from the [latest release](https://github.com/dgoldwas/VideoTrimmer/releases). It installs to `C:\Program Files\VideoTrimmer` with a bundled FFmpeg, adds a Start menu entry, and offers VideoTrimmer in Explorer's **Open with** menu for common video types.
 
-The version button at the right of the status bar shows the running version. VideoTrimmer checks GitHub for a newer release shortly after it starts and every six hours. When one exists, the button changes to **Update to …**. Click it to download the installer, check it against GitHub's SHA-256, close VideoTrimmer, install through a Windows permission prompt, and reopen with the same video. Click the version at any time to check now.
+Click **Check for updates** at the right of the status bar to check GitHub for a newer release. VideoTrimmer also checks shortly after it starts and every six hours. When an update exists, the button changes to **Update to …**. Choose whether to download the installer, check it against GitHub's SHA-256, close VideoTrimmer, install through a Windows permission prompt, and reopen with the same video. Hover over the check button to see the running version.
 
 The check reads this public repository's releases anonymously. When `VIDEOTRIMMER_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` or a GitHub CLI sign-in is available it is used too, which raises GitHub's rate limit.
 

@@ -1,6 +1,6 @@
 namespace VideoTrimmer;
 
-// The status bar shows the running version. When GitHub has a newer release it becomes "Update to …" and installs it on request.
+// The status bar offers a manual check and changes to "Update to …" when a release is available.
 public sealed partial class MainForm
 {
     readonly System.Windows.Forms.Timer updateTimer = new() { Interval = (int)TimeSpan.FromHours(6).TotalMilliseconds };
@@ -17,7 +17,7 @@ public sealed partial class MainForm
         if (UpdateService.TakeLastResult() is { } result)
         {
             if (result.StartsWith("failed", StringComparison.OrdinalIgnoreCase))
-                SetStatus($"The last update didn't install ({result["failed: ".Length..]}). Click the version to try again.", StatusKind.Error);
+                SetStatus($"The last update didn't install ({result["failed: ".Length..]}). Check for updates to try again.", StatusKind.Error);
             else if (result.StartsWith("installed", StringComparison.OrdinalIgnoreCase))
                 SetStatus($"Updated to VideoTrimmer {UpdateService.CurrentVersion}.", StatusKind.Good);
         }
@@ -48,9 +48,9 @@ public sealed partial class MainForm
         }
         else
         {
-            update.Text = "v" + UpdateService.CurrentVersion;
+            update.Text = "Check for updates";
             update.Primary = false;
-            tips.SetToolTip(update, "Check for updates");
+            tips.SetToolTip(update, $"VideoTrimmer {UpdateService.CurrentVersion}: check for updates");
         }
 
         update.AccessibleName = update.Text;
@@ -76,6 +76,7 @@ public sealed partial class MainForm
         {
             // Offline or GitHub unavailable: automatic checks try again later.
             if (manual && !IsDisposed) SetStatus("Couldn't check for updates: " + ex.Message, StatusKind.Error);
+            return;
         }
         finally
         {

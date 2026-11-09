@@ -11,7 +11,7 @@ AppVersion={#AppVersion}
 VersionInfoVersion={#AppVersion}
 AppPublisher=VideoTrimmer
 AppUpdatesURL=https://github.com/dgoldwas/VideoTrimmer/releases
-DefaultDirName={autopf}\VideoTrimmer
+DefaultDirName={autopf}\WarmButter\VideoTrimmer
 UsePreviousAppDir=no
 DefaultGroupName=VideoTrimmer
 DisableProgramGroupPage=yes
@@ -29,6 +29,8 @@ CloseApplications=yes
 ChangesAssociations=yes
 
 [InstallDelete]
+; Releases before the WarmButter folder installed to Program Files\VideoTrimmer. Remove that copy when upgrading.
+Type: filesandordirs; Name: "{autopf}\VideoTrimmer"
 ; Updates replace the whole bundled FFmpeg build rather than mixing DLLs from two versions.
 Type: filesandordirs; Name: "{app}\tools"
 

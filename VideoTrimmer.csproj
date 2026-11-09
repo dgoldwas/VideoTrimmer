@@ -9,7 +9,7 @@
     <AssemblyName>VideoTrimmer</AssemblyName>
     <RootNamespace>VideoTrimmer</RootNamespace>
     <!-- The only place the version is set: YYYY.MM.DD.## (release date, then the build number for that day). -->
-    <Version>2026.11.09.05</Version>
+    <Version>2026.11.09.06</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Product>VideoTrimmer</Product>
     <ApplicationIcon>assets\VideoTrimmer.ico</ApplicationIcon>

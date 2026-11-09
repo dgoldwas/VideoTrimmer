@@ -28,7 +28,7 @@ static class UpdateService
         .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0.0";
 
     /// <summary>Where the installed copy lives. Updates install there whichever copy is running.</summary>
-    public static string InstalledPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "VideoTrimmer", "VideoTrimmer.exe");
+    public static string InstalledPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WarmButter", "VideoTrimmer", "VideoTrimmer.exe");
 
     /// <summary>Where the downloaded installer and the helper that runs it are kept.</summary>
     public static string WorkDirectory => Path.Combine(Path.GetTempPath(), "VideoTrimmer-Update");

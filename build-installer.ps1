@@ -22,7 +22,7 @@ if ($Install) {
   # Setup elevates through UAC and closes a running VideoTrimmer itself.
   $process = Start-Process -FilePath $setup -ArgumentList '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CLOSEAPPLICATIONS' -Verb RunAs -Wait -PassThru
   if ($process.ExitCode -ne 0) { throw "Setup exited with code $($process.ExitCode)." }
-  $installed = Join-Path $env:ProgramFiles 'VideoTrimmer\VideoTrimmer.exe'
+  $installed = Join-Path $env:ProgramFiles 'WarmButter\VideoTrimmer\VideoTrimmer.exe'
   if ((Get-Item -LiteralPath $installed).VersionInfo.ProductVersion -ne $version) { throw "Installed VideoTrimmer.exe does not report version $version." }
   Write-Output "Installed VideoTrimmer $version to $(Split-Path $installed)."
 }

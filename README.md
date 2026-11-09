@@ -13,7 +13,7 @@ A small Windows desktop app for cutting a video down to the parts you want to ke
 - Export a fast stream copy, or re-encode for exact frames. Fast copy can start slightly early, on a keyframe.
 - Exact mode offers High / Balanced / Small quality presets and an optional copy-audio setting.
 - Preserve mapped streams in fast-copy mode (`-map 0`), including audio and subtitles supported by the selected output container.
-- Installs to `C:\Program Files\VideoTrimmer` and updates itself from this repository's GitHub releases.
+- Installs to `C:\Program Files\WarmButter\VideoTrimmer` and updates itself from this repository's GitHub releases.
 
 ## Controls
 
@@ -31,7 +31,7 @@ To remove an ad break, for example: put the playhead where it starts and press `
 
 ## Install
 
-Run `VideoTrimmer-<version>-Setup.exe` from the [latest release](https://github.com/dgoldwas/VideoTrimmer/releases). It installs to `C:\Program Files\VideoTrimmer` with a bundled FFmpeg, adds a Start menu entry, and offers VideoTrimmer in Explorer's **Open with** menu for common video types.
+Run `VideoTrimmer-<version>-Setup.exe` from the [latest release](https://github.com/dgoldwas/VideoTrimmer/releases). It installs to `C:\Program Files\WarmButter\VideoTrimmer` with a bundled FFmpeg, adds a Start menu entry, and offers VideoTrimmer in Explorer's **Open with** menu for common video types.
 
 Click **Check for updates** at the right of the status bar to check GitHub for a newer release. VideoTrimmer also checks shortly after it starts and every six hours. When an update exists, the button changes to **Update to …**. Choose whether to download the installer, check it against GitHub's SHA-256, close VideoTrimmer, install through a Windows permission prompt, and reopen with the same video. Hover over the check button to see the running version.
 

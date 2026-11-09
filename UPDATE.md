@@ -1,5 +1,9 @@
 # Updates
 
+## 2026-11-09 (2026.11.09.06)
+
+- The installer now installs to `C:\Program Files\WarmButter\VideoTrimmer` and removes the earlier `Program Files\VideoTrimmer` copy.
+
 ## 2026-11-09 (2026.11.09.05)
 
 - The status bar now has a clearly labeled **Check for updates** button, with keyboard access. A newer release without an installer is reported as an error instead of saying the app is up to date.
@@ -31,7 +35,7 @@
 - **Multi-cut:** the timeline holds several kept segments. `S` splits at the playhead, `N` starts a new segment, and `Delete` removes the active one. A segment strip lists them as chips and shows the kept and cut totals. Cut regions are dimmed and hatched.
 - Multi-segment export: fast copy copies each part and joins them with the concat demuxer. Exact frames uses one `trim`/`atrim` + `concat` re-encode. A single segment keeps the previous arguments exactly.
 - **Smart timeline:** a waveform lane under the filmstrip, with silence spans (-40 dBFS, at least 0.4 s) and `scdet` scene changes found in the background. Handles snap to them, Ctrl overrides, and there is a **Snap to cuts** toggle. `,` and `.` jump between them.
-- Installer: `build-installer.ps1` builds an Inno Setup installer for `C:\Program Files\VideoTrimmer`, with a pinned GPL FFmpeg (libx264), a Start menu entry, and an **Open with** registration. `-Install` and `-Release` install it or publish it to GitHub.
+- Installer: `build-installer.ps1` builds an Inno Setup installer for `C:\Program Files\WarmButter\VideoTrimmer`, with a pinned GPL FFmpeg (libx264), a Start menu entry, and an **Open with** registration. `-Install` and `-Release` install it or publish it to GitHub.
 - Auto-update: the status bar's version button checks GitHub releases at startup and every six hours. It downloads and verifies the Setup.exe, installs after VideoTrimmer exits, and reopens the same video.
 - Versioning: `<Version>` in the project (YYYY.MM.DD.##) is the single source. Added an app icon.
 - `--check` now also covers segment merging, export plans, silence detection, scdet parsing, and release parsing.

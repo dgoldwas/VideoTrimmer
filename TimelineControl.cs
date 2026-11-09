@@ -323,6 +323,16 @@ sealed class TimelineControl : Control
         return true;
     }
 
+    void ActivateSegmentAt(long frame)
+    {
+        var index = others.FindIndex(s => s.Contains(frame));
+        if (index < 0) return;
+        var target = others[index];
+        others.RemoveAt(index);
+        others.Add(Active);
+        (inFrame, outFrame) = (target.In, target.Out);
+    }
+
     /// <summary>Removes a segment. The last segment cannot be removed.</summary>
     public bool RemoveSegment(int index)
     {
@@ -508,20 +518,11 @@ sealed class TimelineControl : Control
             return;
         }
 
+        // Clicking inside another kept segment makes it the one the handles edit; the playhead goes where you clicked.
+        if (!shift && !alt) ActivateSegmentAt(frameAt);
         ApplyPointer(frameAt, shift, alt);
         drag = DragKind.Playhead;
         Capture = true;
-    }
-
-    protected override void OnMouseDoubleClick(MouseEventArgs e)
-    {
-        base.OnMouseDoubleClick(e);
-        if (!HasMedia || Locked || e.Button != MouseButtons.Left || HitTest(e.Location) == HitKind.Overview) return;
-        // Double-click a kept segment to make it the one the handles edit.
-        var frame = FrameAt(e.X);
-        var index = AllSegments.ToList().FindIndex(s => s.Contains(frame));
-        if (index >= 0 && index != ActiveIndex && SelectSegment(index))
-            InteractionEnded?.Invoke(this, EventArgs.Empty);
     }
 
     protected override void OnMouseMove(MouseEventArgs e)

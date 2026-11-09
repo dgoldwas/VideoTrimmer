@@ -7,7 +7,7 @@ A small Windows desktop app for cutting a video down to the parts you want to ke
 - Open a video by browsing, drag and drop, or Explorer's **Open with** menu.
 - Scrub a filmstrip with an audio waveform beneath it. Drag the in and out handles, or type a timecode and a frame number together.
 - **Zoom** the timeline to work frame by frame in long videos. When zoomed, an overview bar shows the whole clip; drag it to pan.
-- **Multi-cut:** keep several segments of one video and export them joined into one file. Split a segment at the playhead, start a new one, or delete one. Everything outside the kept segments is hatched out.
+- **Multi-cut:** keep several segments of one video. On export, choose whether to stitch them into one file or save each segment as its own numbered file (`name_01`, `name_02`, …). Split a segment at the playhead, start a new one, or delete one. Everything outside the kept segments is hatched out.
 - **Segments sidebar:** every segment is listed with its in, out, length and where it lands in the export. Click one to edit it in the selected-segment panel below the list.
 - **Play the edit:** play/pause plays the kept segments back to back with sound, the way the export will join them. ⏮ and ⏭ skip between cuts.
 - Export a fast stream copy, or re-encode for exact frames. Fast copy can start slightly early, on a keyframe.
@@ -22,7 +22,7 @@ A small Windows desktop app for cutting a video down to the parts you want to ke
 - `I` and `O` do the same at the playhead. Left and Right step one frame. Shift plus an arrow steps one second. Home and End jump to the selection edges. `[` and `]` nudge the edge nearest the playhead.
 - The mouse wheel steps one frame while the pointer is over the preview or the filmstrip.
 - `S` splits the segment under the playhead. `N` starts a new segment at the playhead that runs to the next kept segment or the end. `Delete` removes the selected segment. **Reset** keeps the whole video again.
-- Click a segment in the sidebar, or double-click a dashed segment on the filmstrip, to make it the one the handles edit. A segment's `×` removes it. Dragging a segment into another one merges them when you let go.
+- Click a segment in the sidebar, or click inside a dashed segment on the filmstrip, to make it the one the handles edit. A segment's `×` removes it. Dragging a segment into another one merges them when you let go.
 - `Space` (or a click on the preview) plays and pauses the edit from the playhead. A playhead inside a cut starts at the next kept frame. `,` and `.` jump to the previous and next cut. While playing they skip between joins; while paused they also stop at each segment's out point.
 - `Ctrl`+wheel zooms the timeline around the pointer. `+`, `-` and `0` zoom in, zoom out and fit. A tilt wheel or sideways touchpad swipe pans. Dragging a handle past the edge of a zoomed view scrolls it.
 

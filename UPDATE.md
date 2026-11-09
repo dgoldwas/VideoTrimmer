@@ -1,5 +1,12 @@
 # Updates
 
+## 2026-11-09 (2026.11.09.03)
+
+- A single click inside a kept segment on the filmstrip selects it. Double-click is no longer needed.
+- Exporting more than one segment asks whether to **stitch them into one video** or **save each segment as a separate file** (`name_01`, `name_02`, …).
+- Separate files follow the segments as drawn, so splitting a video at a few points and saving separate files breaks it into parts.
+- Before writing separate files, the export asks whether to replace any that already exist. Canceling keeps the files already finished and removes the one in progress.
+
 ## 2026-11-09 (2026.11.09.02)
 
 - Removed scene-change and silence detection, the markers, and snapping. The waveform stays.

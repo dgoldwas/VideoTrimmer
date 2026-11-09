@@ -175,7 +175,7 @@ public sealed partial class MainForm : Form
         tips.SetToolTip(editor.InLater, "One frame later");
         tips.SetToolTip(editor.OutEarlier, "One frame earlier");
         tips.SetToolTip(editor.OutLater, "One frame later");
-        tips.SetToolTip(timeline, "Drag the handles to trim. Drag the highlighted span to slide it. Double-click a dashed segment to edit it. Ctrl+wheel zooms; drag the bar on top to pan.");
+        tips.SetToolTip(timeline, "Drag the handles to trim. Drag the highlighted span to slide it. Click a dashed segment to edit it. Ctrl+wheel zooms; drag the bar on top to pan.");
         tips.SetToolTip(exportBar.Fast, ExportModeCopy.FastExplanation);
         tips.SetToolTip(exportBar.Exact, ExportModeCopy.ExactBaseExplanation);
         tips.SetToolTip(exportBar.QualityHigh, ExactExportPresets.Hint(ExactQuality.High));
@@ -894,23 +894,45 @@ public sealed partial class MainForm : Form
         }
 
         StopPlayback();
+        // Separate files follow the segments as drawn, even ones that touch (splitting a video into parts).
+        // A stitched export joins touching segments, since that changes nothing in the result.
+        var pieces = timeline.AllSegments;
+        var separate = false;
+        if (pieces.Count > 1)
+        {
+            var choice = AskSeparateFiles(pieces.Count);
+            if (choice is null) return;
+            separate = choice.Value;
+        }
+
+        var segments = separate ? pieces : timeline.ExportSegments;
+
+        var extension = Path.GetExtension(input);
         using var dialog = new SaveFileDialog
         {
-            FileName = Path.GetFileNameWithoutExtension(input) + "_trimmed" + Path.GetExtension(input),
+            FileName = Path.GetFileNameWithoutExtension(input) + (separate ? "_part" : "_trimmed") + extension,
             Filter = "Same container|*",
             InitialDirectory = Path.GetDirectoryName(input) ?? "",
+            Title = separate ? $"Name the files — the {segments.Count} segments are saved as name_01, name_02, …" : "Save the trimmed video",
+            // Separate files get numbered names, so the chosen name itself is never written.
+            OverwritePrompt = !separate,
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         var output = dialog.FileName;
-        if (string.Equals(Path.GetFullPath(output), Path.GetFullPath(input), StringComparison.OrdinalIgnoreCase))
+        var outputs = separate ? ExportService.SeparateOutputs(output, segments.Count) : [output];
+        if (outputs.Any(path => string.Equals(Path.GetFullPath(path), Path.GetFullPath(input), StringComparison.OrdinalIgnoreCase)))
         {
             SetStatus("Choose a different file from the video you are trimming.", StatusKind.Error);
             return;
         }
 
+        var existing = separate ? outputs.Where(File.Exists).ToList() : [];
+        if (existing.Count > 0 && MessageBox.Show(this,
+                $"{existing.Count} of these files already exist and will be replaced, starting with {Path.GetFileName(existing[0])}.\n\nReplace them?",
+                "VideoTrimmer", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+
         ReplaceCts(ref exportCts);
         var token = exportCts.Token;
-        var segments = timeline.ExportSegments;
         var mode = exact ? "Encoding exact frames" : "Saving fast copy";
         if (segments.Count > 1) mode += $" of {segments.Count} segments";
         exporting = true;
@@ -928,9 +950,12 @@ public sealed partial class MainForm : Form
         SetStatus(mode + "…", StatusKind.Busy);
         var exactOptions = exportBar.ExactOptions;
         ExportPlan? plan = null;
+        var completed = 0;
         try
         {
-            plan = ExportService.Plan(input, output, segments, timeline.Fps, hasAudio, exact, exactOptions);
+            plan = separate
+                ? ExportService.PlanSeparate(input, output, segments, timeline.Fps, exact, exactOptions)
+                : ExportService.Plan(input, output, segments, timeline.Fps, hasAudio, exact, exactOptions);
             if (plan.WorkDirectory is not null)
             {
                 var work = Directory.CreateDirectory(plan.WorkDirectory);
@@ -944,7 +969,9 @@ public sealed partial class MainForm : Form
             {
                 var step = plan.Steps[i];
                 var before = done;
-                var phase = plan.Steps.Count == 1 ? mode : i < plan.Steps.Count - 1 ? $"Copying segment {i + 1} of {plan.Steps.Count - 1}" : "Joining segments";
+                var phase = separate ? $"Saving segment {i + 1} of {plan.Steps.Count}"
+                    : plan.Steps.Count == 1 ? mode
+                    : i < plan.Steps.Count - 1 ? $"Copying segment {i + 1} of {plan.Steps.Count - 1}" : "Joining segments";
                 var progress = new Progress<TimeSpan>(elapsed =>
                 {
                     if (!exporting || IsDisposed) return;
@@ -956,13 +983,16 @@ public sealed partial class MainForm : Form
                 SetStatus(phase + "…", StatusKind.Busy);
                 await runner.RunAsync(runner.Ffmpeg, step.Arguments, token, progress);
                 done += step.Weight;
+                completed++;
             }
 
-            SetStatus("Saved: " + output, StatusKind.Good);
+            SetStatus(separate ? $"Saved {outputs.Count} files: {Path.GetFileName(outputs[0])} … {Path.GetFileName(outputs[^1])} in {Path.GetDirectoryName(outputs[0])}" : "Saved: " + output, StatusKind.Good);
         }
         catch (OperationCanceledException)
         {
-            ExportService.TryDelete(output);
+            // Files finished before the cancel are kept; the one being written is removed.
+            foreach (var path in separate ? outputs.Skip(completed) : outputs)
+                ExportService.TryDelete(path);
             if (!IsDisposed) SetStatus("Export canceled.", StatusKind.Info);
         }
         catch (Exception ex)
@@ -987,6 +1017,30 @@ public sealed partial class MainForm : Form
                 LayoutChrome();
             }
         }
+    }
+
+    /// <summary>
+    /// With several segments, asks whether to join them into one file or save each as its own file.
+    /// Returns null when the user cancels.
+    /// </summary>
+    bool? AskSeparateFiles(int count)
+    {
+        var stitch = new TaskDialogCommandLinkButton("Stitch into one video", "Join the segments in order into a single file, as Play shows them.");
+        var split = new TaskDialogCommandLinkButton($"Save {count} separate files", "Each segment becomes its own file, numbered _01, _02, …");
+        var page = new TaskDialogPage
+        {
+            Caption = "VideoTrimmer",
+            Heading = $"Export {count} segments",
+            Text = "How should the segments be saved?",
+            Icon = TaskDialogIcon.None,
+            Buttons = { stitch, split, TaskDialogButton.Cancel },
+            DefaultButton = stitch,
+            AllowCancel = true,
+        };
+        var result = TaskDialog.ShowDialog(this, page);
+        if (result == stitch) return false;
+        if (result == split) return true;
+        return null;
     }
 
     void CancelExport()

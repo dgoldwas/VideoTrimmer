@@ -7,10 +7,10 @@ namespace VideoTrimmer;
 readonly record struct ExportStep(string[] Arguments, double Seconds, double Weight);
 
 /// <summary>
-/// The FFmpeg runs that produce one output. Multi-segment fast copies write parts into <see cref="WorkDirectory"/>
+/// The FFmpeg runs that produce <see cref="Outputs"/>. Multi-segment fast copies write parts into <see cref="WorkDirectory"/>
 /// and join them with the concat demuxer, using <see cref="ListFile"/>.
 /// </summary>
-sealed record ExportPlan(IReadOnlyList<ExportStep> Steps, string? WorkDirectory, string? ListFile, string? ListText);
+sealed record ExportPlan(IReadOnlyList<ExportStep> Steps, string? WorkDirectory, string? ListFile, string? ListText, IReadOnlyList<string> Outputs);
 
 static class ExportService
 {
@@ -77,11 +77,11 @@ static class ExportService
         if (segments.Count == 1)
         {
             var only = segments[0];
-            return new ExportPlan([new ExportStep(BuildArguments(input, output, Sec(only.In), Sec(only.Out), exact, exactOptions), total, 1)], null, null, null);
+            return new ExportPlan([new ExportStep(BuildArguments(input, output, Sec(only.In), Sec(only.Out), exact, exactOptions), total, 1)], null, null, null, [output]);
         }
 
         if (exact)
-            return new ExportPlan([new ExportStep(BuildExactConcat(input, output, segments, fps, hasAudio, exactOptions ?? ExactExportOptions.Default), total, 1)], null, null, null);
+            return new ExportPlan([new ExportStep(BuildExactConcat(input, output, segments, fps, hasAudio, exactOptions ?? ExactExportOptions.Default), total, 1)], null, null, null, [output]);
 
         // Fast copy: copy each part beside the output (same drive, so no cross-volume copies), then join them losslessly.
         var directory = Path.GetDirectoryName(Path.GetFullPath(output)) ?? ".";
@@ -108,7 +108,38 @@ static class ExportService
             "-c", "copy",
             output,
         ], total, total / 3));
-        return new ExportPlan(steps, work, listFile, list.ToString());
+        return new ExportPlan(steps, work, listFile, list.ToString(), [output]);
+    }
+
+    /// <summary>The file names for saving each segment on its own: name_01.ext, name_02.ext, ...</summary>
+    public static IReadOnlyList<string> SeparateOutputs(string output, int count)
+    {
+        var directory = Path.GetDirectoryName(Path.GetFullPath(output)) ?? ".";
+        var name = Path.GetFileNameWithoutExtension(output);
+        var extension = Path.GetExtension(output);
+        var digits = Math.Max(2, count.ToString(CultureInfo.InvariantCulture).Length);
+        return Enumerable.Range(1, count)
+            .Select(i => Path.Combine(directory, $"{name}_{i.ToString("D" + digits, CultureInfo.InvariantCulture)}{extension}"))
+            .ToList();
+    }
+
+    /// <summary>Saves each segment as its own file, using the single-cut arguments for every one.</summary>
+    public static ExportPlan PlanSeparate(
+        string input,
+        string output,
+        IReadOnlyList<Segment> segments,
+        double fps,
+        bool exact,
+        ExactExportOptions? exactOptions = null)
+    {
+        if (segments.Count == 0) throw new ArgumentException("Nothing is selected to export.", nameof(segments));
+        var outputs = SeparateOutputs(output, segments.Count);
+        var steps = segments.Select((segment, i) =>
+        {
+            var seconds = (segment.Out - segment.In) / fps;
+            return new ExportStep(BuildArguments(input, outputs[i], segment.In / fps, segment.Out / fps, exact, exactOptions), seconds, seconds);
+        }).ToList();
+        return new ExportPlan(steps, null, null, null, outputs);
     }
 
     /// <summary>
@@ -228,6 +259,12 @@ static class ExportService
         Expect(fastPlan.WorkDirectory == Path.Combine("C:\\clips", ".out.mp4.parts"), "parts sit beside the output");
         Expect(fastPlan.ListText == "file 'part001.mp4'\nfile 'part002.mp4'\n", "concat list names the parts");
         Expect(fastPlan.Steps[^1].Arguments.Contains("concat") && fastPlan.Steps[^1].Arguments[^1] == Path.Combine("C:\\clips", "out.mp4"), "join writes the output");
+
+        var showPath = Path.GetFullPath("show.mkv");
+        var separate = PlanSeparate("in.mp4", showPath, two, 30, exact: true, new ExactExportOptions(ExactQuality.High, CopyAudio: true));
+        Expect(separate.Outputs.Select(Path.GetFileName).SequenceEqual(["show_01.mkv", "show_02.mkv"]), "separate files are numbered");
+        Expect(separate.Steps.Count == 2 && separate.Steps[1].Arguments.SequenceEqual(BuildArguments("in.mp4", separate.Outputs[1], 10, 11, exact: true, new ExactExportOptions(ExactQuality.High, CopyAudio: true))), "each separate file uses the single-cut arguments");
+        Expect(Path.GetFileName(SeparateOutputs("a.mp4", 120)[0]) == "a_001.mp4", "numbering widens past 99");
         return errors;
     }
 }

@@ -22,7 +22,8 @@ A small Windows desktop app for cutting a video down to the parts you want to ke
 - `I` and `O` do the same at the playhead. Left and Right step one frame. Shift plus an arrow steps one second. Home and End jump to the selection edges. `[` and `]` nudge the edge nearest the playhead.
 - The mouse wheel steps one frame while the pointer is over the preview or the filmstrip.
 - `S` splits the segment under the playhead. `N` starts a new segment at the playhead that runs to the next kept segment or the end. `Delete` removes the selected segment. **Reset** keeps the whole video again.
-- Click a segment in the sidebar, or click inside a dashed segment on the filmstrip, to make it the one the handles edit. A segment's `×` removes it. Dragging a segment into another one merges them when you let go.
+- Click a segment in the sidebar, or click inside a dashed segment on the filmstrip, to make it the one the handles edit.
+- To export only some segments, select several in the sidebar: `Ctrl`+click adds or removes one, `Shift`+click selects a range, and `Ctrl+A` selects all. Selected rows show a ✓ and the button changes to **Export N selected…**. Export then saves just those, stitched or as separate files. A plain click or `Esc` goes back to a single selection, and then Export uses every segment again. A segment's `×` removes it. Dragging a segment into another one merges them when you let go.
 - `Space` (or a click on the preview) plays and pauses the edit from the playhead. A playhead inside a cut starts at the next kept frame. `,` and `.` jump to the previous and next cut. While playing they skip between joins; while paused they also stop at each segment's out point.
 - `Ctrl`+wheel zooms the timeline around the pointer. `+`, `-` and `0` zoom in, zoom out and fit. A tilt wheel or sideways touchpad swipe pans. Dragging a handle past the edge of a zoomed view scrolls it.
 

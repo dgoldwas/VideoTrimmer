@@ -28,6 +28,7 @@ sealed class TimelineControl : Control
     static readonly Pen LaneLinePen = new(Theme.Border);
     static readonly Pen SelectionPen = new(Theme.Accent, 2);
     static readonly Pen KeptPen = new(Color.FromArgb(170, Theme.Accent), 2) { DashStyle = DashStyle.Dash };
+    static readonly Pen PickedPen = new(Theme.Accent, 2);
     static readonly Pen PlayheadPen = new(Theme.Text, 2);
 
     Bitmap?[]? strip;
@@ -40,6 +41,8 @@ sealed class TimelineControl : Control
     long outFrame;
     long playhead;
     readonly List<Segment> others = new();
+    // Segments picked for export alongside the active one (a multi-selection). Always a subset of others.
+    readonly HashSet<Segment> picked = new();
     DragKind drag = DragKind.None;
     Point dragStart;
     long spanAnchorIn;
@@ -91,6 +94,72 @@ sealed class TimelineControl : Control
 
     public int ActiveIndex => others.Count(s => s.In < inFrame);
 
+    /// <summary>Indices in <see cref="AllSegments"/> picked alongside the active one; empty for a single selection.</summary>
+    public IReadOnlySet<int> PickedIndices
+    {
+        get
+        {
+            var all = AllSegments;
+            return Enumerable.Range(0, all.Count).Where(i => picked.Contains(all[i])).ToHashSet();
+        }
+    }
+
+    /// <summary>The multi-selection in time order, active segment included, or empty when only one is selected.</summary>
+    public IReadOnlyList<Segment> PickedSegments => picked.Count == 0 ? [] : picked.Append(Active).OrderBy(s => s.In).ToList();
+
+    /// <summary>Ctrl+click: adds a segment to the selection or takes it out.</summary>
+    public void TogglePick(int index)
+    {
+        if (!HasMedia || Locked) return;
+        var all = AllSegments;
+        if (index < 0 || index >= all.Count) return;
+        if (index != ActiveIndex)
+        {
+            if (!picked.Remove(all[index])) picked.Add(all[index]);
+        }
+        else if (picked.Count > 0)
+        {
+            // Taking the active segment out hands editing to the earliest one still picked.
+            var next = picked.OrderBy(s => s.In).First();
+            picked.Remove(next);
+            others.Remove(next);
+            others.Add(Active);
+            (inFrame, outFrame) = (next.In, next.Out);
+            playhead = inFrame;
+        }
+
+        NotifyValues();
+    }
+
+    /// <summary>Shift+click: picks every segment from the active one to <paramref name="index"/>.</summary>
+    public void PickRange(int index)
+    {
+        if (!HasMedia || Locked) return;
+        var all = AllSegments;
+        if (index < 0 || index >= all.Count) return;
+        var active = ActiveIndex;
+        picked.Clear();
+        for (var i = Math.Min(active, index); i <= Math.Max(active, index); i++)
+            if (i != active) picked.Add(all[i]);
+        NotifyValues();
+    }
+
+    public void PickAll()
+    {
+        if (!HasMedia || Locked) return;
+        picked.Clear();
+        picked.UnionWith(others);
+        NotifyValues();
+    }
+
+    public bool ClearPicks()
+    {
+        if (picked.Count == 0) return false;
+        picked.Clear();
+        NotifyValues();
+        return true;
+    }
+
     /// <summary>What the export keeps: sorted, with touching segments joined.</summary>
     public IReadOnlyList<Segment> ExportSegments => CutList.Normalize(others.Append(Active), totalFrames);
 
@@ -127,6 +196,7 @@ sealed class TimelineControl : Control
         outFrame = totalFrames;
         playhead = 0;
         others.Clear();
+        picked.Clear();
         strip = null;
         drag = DragKind.None;
         viewStart = 0;
@@ -268,6 +338,7 @@ sealed class TimelineControl : Control
     public bool SplitAtPlayhead()
     {
         if (!HasMedia || Locked) return false;
+        picked.Clear();
         if (playhead > inFrame && playhead < outFrame)
         {
             others.Add(new Segment(inFrame, playhead));
@@ -291,6 +362,7 @@ sealed class TimelineControl : Control
     public bool NewSegmentAtPlayhead()
     {
         if (!HasMedia || Locked) return false;
+        picked.Clear();
         var gaps = CutList.Gaps(CutList.Normalize(others.Append(Active), totalFrames), totalFrames);
         if (gaps.Count == 0) return false;
         var gap = gaps.FirstOrDefault(g => g.Contains(playhead));
@@ -304,14 +376,18 @@ sealed class TimelineControl : Control
         return true;
     }
 
-    public bool SelectSegment(int index)
+    /// <summary>Makes a segment the one being edited. Unless <paramref name="keepPicks"/>, the multi-selection is cleared.</summary>
+    public bool SelectSegment(int index, bool keepPicks = false)
     {
         if (!HasMedia || Locked) return false;
         var all = AllSegments;
         if (index < 0 || index >= all.Count) return false;
+        if (!keepPicks) picked.Clear();
         if (index != ActiveIndex)
         {
             var target = all[index];
+            // The segment that stops being edited stays in the selection it belonged to.
+            if (picked.Count > 0) picked.Add(Active);
             others.Remove(target);
             others.Add(Active);
             (inFrame, outFrame) = (target.In, target.Out);
@@ -327,6 +403,7 @@ sealed class TimelineControl : Control
     {
         var index = others.FindIndex(s => s.Contains(frame));
         if (index < 0) return;
+        picked.Clear();
         var target = others[index];
         others.RemoveAt(index);
         others.Add(Active);
@@ -360,6 +437,7 @@ sealed class TimelineControl : Control
     {
         if (!HasMedia || Locked) return;
         others.Clear();
+        picked.Clear();
         (inFrame, outFrame) = (0, totalFrames);
         NotifyValues();
     }
@@ -449,7 +527,7 @@ sealed class TimelineControl : Control
             if (i == active) continue;
             var x1 = XOf(all[i].In);
             var x2 = XOf(all[i].Out);
-            g.DrawRectangle(KeptPen, x1, track.Top + 1, Math.Max(1, x2 - x1), track.Height - 3);
+            g.DrawRectangle(picked.Contains(all[i]) ? PickedPen : KeptPen, x1, track.Top + 1, Math.Max(1, x2 - x1), track.Height - 3);
             if (numbered) DrawBadge(g, (i + 1).ToString(), x1, x2, film, selected: false);
         }
 
@@ -670,6 +748,8 @@ sealed class TimelineControl : Control
     {
         // Merge on settle rather than mid-drag, so dragging across a neighbor does not swallow it until release.
         if (drag == DragKind.None) AbsorbOverlaps();
+        // Removed, merged or now-active segments drop out of the multi-selection.
+        picked.IntersectWith(others);
         var description = HasMedia
             ? $"Segment {ActiveIndex + 1} of {others.Count + 1}: in {TimeMath.Format(inFrame, fps)}, out {TimeMath.Format(outFrame, fps)}, playhead {TimeMath.Format(playhead, fps)}"
             : "No video";
@@ -984,6 +1064,45 @@ sealed class TimelineControl : Control
     static void DrawBorder(Graphics graphics, Rectangle rect)
     {
         graphics.DrawRectangle(BorderPen, rect.X, rect.Y, rect.Width - 1, rect.Height - 1);
+    }
+
+    public static IReadOnlyList<string> SelfCheck()
+    {
+        var errors = new List<string>();
+        void Expect(bool condition, string message)
+        {
+            if (!condition) errors.Add(message);
+        }
+
+        using var timeline = new TimelineControl();
+        timeline.SetClip(40, 30, 1200);
+        foreach (var at in new long[] { 300, 600, 900 })
+        {
+            timeline.SetPlayhead(at);
+            timeline.SplitAtPlayhead();
+        }
+
+        // Segments: 0-300, 300-600, 600-900, 900-1200; the last split leaves 900-1200 active.
+        Expect(timeline.AllSegments.Count == 4 && timeline.ActiveIndex == 3, "three splits make four segments");
+        timeline.TogglePick(1);
+        Expect(timeline.PickedSegments.SequenceEqual([new Segment(300, 600), new Segment(900, 1200)]), "ctrl+click adds a segment to the selection");
+        timeline.TogglePick(1);
+        Expect(timeline.PickedSegments.Count == 0, "ctrl+click again takes it out");
+        timeline.PickRange(1);
+        Expect(timeline.PickedSegments.Count == 3 && timeline.PickedSegments[0] == new Segment(300, 600), "shift+click picks the range");
+        timeline.SelectSegment(2, keepPicks: true);
+        Expect(timeline.PickedSegments.Count == 3 && timeline.ActiveIndex == 2, "editing another picked segment keeps the selection");
+        timeline.TogglePick(2);
+        Expect(timeline.PickedSegments.SequenceEqual([new Segment(300, 600), new Segment(900, 1200)]) && timeline.ActiveIndex == 1, "unpicking the active segment hands editing to another picked one");
+        timeline.RemoveSegment(3);
+        Expect(timeline.PickedSegments.Count == 0, "removing a picked segment drops it from the selection");
+        timeline.PickAll();
+        Expect(timeline.PickedSegments.Count == 3, "select all");
+        Expect(timeline.ClearPicks() && timeline.PickedSegments.Count == 0, "escape clears the selection");
+        timeline.PickAll();
+        timeline.SelectSegment(0);
+        Expect(timeline.PickedSegments.Count == 0, "a plain click selects just one");
+        return errors;
     }
 
     static void DrawCover(Graphics graphics, Image image, RectangleF slot)

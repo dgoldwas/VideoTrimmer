@@ -133,11 +133,7 @@ public sealed partial class MainForm : Form
         splitButton.Click += (_, _) => SplitSegment();
         newButton.Click += (_, _) => NewSegment();
         resetButton.Click += (_, _) => ResetSegments();
-        segmentList.SelectRequested += (_, index) =>
-        {
-            StopPlayback();
-            if (timeline.SelectSegment(index)) SchedulePreview(true);
-        };
+        segmentList.SelectRequested += (_, click) => OnSegmentClicked(click);
         segmentList.RemoveRequested += (_, index) => RemoveSegment(index);
 
         editor.SetIn.Click += (_, _) => Edit(() => timeline.SetInToPlayhead());
@@ -279,6 +275,12 @@ public sealed partial class MainForm : Form
             return true;
         }
 
+        if (keyData == (Keys.Control | Keys.A) && ActiveControl is not TextBox && timeline.HasMedia && !exporting)
+        {
+            timeline.PickAll();
+            return true;
+        }
+
         if (ActiveControl is TextBox box)
         {
             if (keyData == Keys.Enter)
@@ -305,6 +307,8 @@ public sealed partial class MainForm : Form
                 return true;
             case Keys.Escape when player.IsPlaying:
                 StopPlayback();
+                return true;
+            case Keys.Escape when timeline.ClearPicks():
                 return true;
             case Keys.Oemcomma:
                 JumpCut(-1);
@@ -584,10 +588,20 @@ public sealed partial class MainForm : Form
 
         var all = timeline.AllSegments;
         var kept = timeline.ExportSegments;
-        segmentList.SetSegments(all, timeline.ActiveIndex, timeline.Fps);
-        exportBar.SetSegmentCount(kept.Count);
+        var picks = timeline.PickedSegments;
+        segmentList.SetSegments(all, timeline.ActiveIndex, timeline.Fps, timeline.PickedIndices);
+        exportBar.SetSegmentCount(picks.Count > 0 ? picks.Count : kept.Count);
+        var exportText = picks.Count > 0 ? $"Export {picks.Count} selected…" : "Export…";
+        if (exportBar.Export.Text != exportText)
+        {
+            exportBar.Export.Text = exportText;
+            exportBar.Export.Invalidate();
+        }
+
         var keptFrames = CutList.KeptFrames(kept);
-        segmentsCard.Detail = $"{all.Count}  ·  {TimeMath.Format(keptFrames, timeline.Fps)} kept";
+        segmentsCard.Detail = picks.Count > 0
+            ? $"{picks.Count} of {all.Count} selected  ·  {TimeMath.Format(picks.Sum(p => p.Length), timeline.Fps)}"
+            : $"{all.Count}  ·  {TimeMath.Format(keptFrames, timeline.Fps)} kept";
         var frames = timeline.OutFrame - timeline.InFrame;
         var unit = frames == 1 ? "frame" : "frames";
         editor.Selected.Text = $"Segment {timeline.ActiveIndex + 1}  ·  {TimeMath.Format(frames, timeline.Fps)}  ·  {frames:N0} {unit}";
@@ -894,9 +908,11 @@ public sealed partial class MainForm : Form
         }
 
         StopPlayback();
+        // A multi-selection in the list limits the export to those segments.
         // Separate files follow the segments as drawn, even ones that touch (splitting a video into parts).
         // A stitched export joins touching segments, since that changes nothing in the result.
-        var pieces = timeline.AllSegments;
+        var picks = timeline.PickedSegments;
+        var pieces = picks.Count > 0 ? picks : timeline.AllSegments;
         var separate = false;
         if (pieces.Count > 1)
         {
@@ -905,7 +921,7 @@ public sealed partial class MainForm : Form
             separate = choice.Value;
         }
 
-        var segments = separate ? pieces : timeline.ExportSegments;
+        var segments = separate ? pieces : CutList.Normalize(pieces, timeline.TotalFrames);
 
         var extension = Path.GetExtension(input);
         using var dialog = new SaveFileDialog
@@ -1047,6 +1063,21 @@ public sealed partial class MainForm : Form
     {
         if (!exporting) return;
         exportCts.Cancel();
+    }
+
+    /// <summary>
+    /// A click in the segment list: plain selects one segment to edit, Ctrl adds or removes one from the selection,
+    /// Shift selects a range. A selection of two or more is what Export saves.
+    /// </summary>
+    void OnSegmentClicked(SegmentClick click)
+    {
+        if (!timeline.HasMedia || exporting) return;
+        StopPlayback();
+        if (click.Modifiers.HasFlag(Keys.Shift)) timeline.PickRange(click.Index);
+        else if (click.Modifiers.HasFlag(Keys.Control)) timeline.TogglePick(click.Index);
+        else if (timeline.SelectSegment(click.Index)) SchedulePreview(true);
+        var picks = timeline.PickedSegments.Count;
+        if (picks > 0) SetStatus($"{picks} segments selected. Export saves just these; click a segment or press Esc to clear.", StatusKind.Info);
     }
 
     void SplitSegment()

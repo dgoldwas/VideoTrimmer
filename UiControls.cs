@@ -533,20 +533,25 @@ sealed class Card : Panel
     }
 }
 
+/// <summary>A click on a segment row, with the Ctrl and Shift state that decides how it selects.</summary>
+readonly record struct SegmentClick(int Index, Keys Modifiers);
+
 /// <summary>
 /// Every kept segment as a row: number, in → out, length, and where it lands in the export.
-/// Click a row to edit that segment; its × removes it. Scrolls with the mouse wheel.
+/// Click a row to edit that segment; Ctrl+click and Shift+click pick several for export. Its × removes it.
+/// Scrolls with the mouse wheel.
 /// </summary>
 sealed class SegmentList : Control
 {
     IReadOnlyList<Segment> segments = [];
+    IReadOnlySet<int> picked = new HashSet<int>();
     int active;
     double fps = 30;
     int scroll;
     int hover = -1;
     bool hoverClose;
 
-    public event EventHandler<int>? SelectRequested;
+    public event EventHandler<SegmentClick>? SelectRequested;
     public event EventHandler<int>? RemoveRequested;
 
     public SegmentList()
@@ -562,15 +567,19 @@ sealed class SegmentList : Control
     int Stride => RowHeight + Gap;
     int MaxScroll => Math.Max(0, segments.Count * Stride - Gap - ClientSize.Height);
 
-    public void SetSegments(IReadOnlyList<Segment> all, int activeIndex, double framesPerSecond)
+    /// <param name="pickedIndices">Rows picked for export besides the active one; empty when only one is selected.</param>
+    public void SetSegments(IReadOnlyList<Segment> all, int activeIndex, double framesPerSecond, IReadOnlySet<int> pickedIndices)
     {
         var activeMoved = activeIndex != active || all.Count != segments.Count;
         segments = all;
         active = activeIndex;
         fps = framesPerSecond;
+        picked = pickedIndices;
         if (activeMoved) ScrollIntoView(active);
         scroll = Math.Clamp(scroll, 0, MaxScroll);
-        AccessibleDescription = $"{all.Count} segments. Segment {active + 1} is selected.";
+        AccessibleDescription = picked.Count > 0
+            ? $"{all.Count} segments. {picked.Count + 1} are selected for export; segment {active + 1} is being edited."
+            : $"{all.Count} segments. Segment {active + 1} is selected.";
         Invalidate();
     }
 
@@ -613,21 +622,27 @@ sealed class SegmentList : Control
     {
         var segment = segments[index];
         var selected = index == active;
+        var multi = picked.Count > 0;
+        var inPick = multi && (selected || picked.Contains(index));
         var hovered = index == hover;
-        var fill = selected ? Theme.Mix(Theme.Surface, Theme.Accent, 0.28f) : hovered ? Theme.Lift(Theme.Background, 10) : Theme.Background;
+        var fill = selected ? Theme.Mix(Theme.Surface, Theme.Accent, 0.28f)
+            : inPick ? Theme.Mix(Theme.Surface, Theme.Accent, 0.14f)
+            : hovered ? Theme.Lift(Theme.Background, 10) : Theme.Background;
+        var border = selected ? Theme.Accent : inPick ? Theme.Mix(Theme.Border, Theme.Accent, 0.6f) : Theme.Border;
         using (var path = PaintUtil.Rounded(new Rectangle(row.X, row.Y, row.Width - 1, row.Height - 1), LogicalToDeviceUnits(10)))
         using (var brush = new SolidBrush(fill))
-        using (var pen = new Pen(selected ? Theme.Accent : Theme.Border, selected ? 2 : 1))
+        using (var pen = new Pen(border, selected || inPick ? 2 : 1))
         {
             g.FillPath(brush, path);
             g.DrawPath(pen, path);
         }
 
+        // Picked rows show a check instead of their number, so the export choice reads at a glance.
         var badgeSize = LogicalToDeviceUnits(24);
         var badge = new Rectangle(row.Left + LogicalToDeviceUnits(10), row.Top + (row.Height - badgeSize) / 2, badgeSize, badgeSize);
-        using (var badgeBrush = new SolidBrush(selected ? Theme.Accent : Theme.Surface))
+        using (var badgeBrush = new SolidBrush(selected || inPick ? Theme.Accent : Theme.Surface))
             g.FillEllipse(badgeBrush, badge);
-        TextRenderer.DrawText(g, (index + 1).ToString(), Theme.Ui(8.5f, FontStyle.Bold), badge, selected ? Color.White : Theme.Text,
+        TextRenderer.DrawText(g, inPick ? "✓" : (index + 1).ToString(), Theme.Ui(8.5f, FontStyle.Bold), badge, selected || inPick ? Color.White : Theme.Text,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
 
         var textLeft = badge.Right + LogicalToDeviceUnits(10);
@@ -686,7 +701,7 @@ sealed class SegmentList : Control
         var (index, close) = HitAt(e.Location);
         if (index < 0) return;
         if (close) RemoveRequested?.Invoke(this, index);
-        else SelectRequested?.Invoke(this, index);
+        else SelectRequested?.Invoke(this, new SegmentClick(index, ModifierKeys & (Keys.Control | Keys.Shift)));
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)

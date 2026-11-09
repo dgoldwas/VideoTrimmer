@@ -13,6 +13,7 @@ internal static class Program
                 .Concat(CutList.SelfCheck())
                 .Concat(AudioWaveform.SelfCheck())
                 .Concat(EditPlayer.SelfCheck())
+                .Concat(TimelineControl.SelfCheck())
                 .Concat(UpdateService.SelfCheck())
                 .ToList();
             var path = Path.Combine(Path.GetTempPath(), "vt-check.txt");

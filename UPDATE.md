@@ -1,5 +1,11 @@
 # Updates
 
+## 2026-11-09 (2026.11.09.04)
+
+- Multi-select in the Segments list: `Ctrl`+click, `Shift`+click, `Ctrl+A`, and `Esc` to clear. With two or more selected, Export saves only those, stitched or as separate files. The button reads **Export N selected…** and the list header shows the selected count and length.
+- Selected segments get a ✓ in the list and a solid outline on the filmstrip.
+- `--check` now covers the selection rules.
+
 ## 2026-11-09 (2026.11.09.03)
 
 - A single click inside a kept segment on the filmstrip selects it. Double-click is no longer needed.

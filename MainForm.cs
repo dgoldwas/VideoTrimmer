@@ -2,10 +2,10 @@ using System.Globalization;
 
 namespace VideoTrimmer;
 
-public sealed class MainForm : Form
+public sealed partial class MainForm : Form
 {
     const string VideoFilter = "Video files|*.mkv;*.mp4;*.mov;*.avi;*.webm;*.ts;*.m2ts;*.wmv|All files|*.*";
-    const string ReadyHint = "Click the filmstrip to move. Shift-click sets in. Alt-click sets out.";
+    const string ReadyHint = "Click the filmstrip to move. Shift-click sets in, Alt-click sets out. S splits, N starts a segment, , and . jump between cuts.";
 
     readonly FfmpegRunner runner = new();
     readonly StillCapture stills;
@@ -26,17 +26,20 @@ public sealed class MainForm : Form
     readonly Label playheadLabel = new();
     readonly TimelineControl timeline = new();
     readonly PointsPanel points = new();
+    readonly SegmentStrip segmentStrip = new();
     readonly ExportBar exportBar = new();
 
     CancellationTokenSource loadCts = new();
     CancellationTokenSource previewCts = new();
     CancellationTokenSource filmCts = new();
     CancellationTokenSource exportCts = new();
+    CancellationTokenSource analysisCts = new();
 
     string? input;
     double duration;
     double fps;
     bool exact;
+    bool hasAudio;
     bool exporting;
     bool syncing;
     bool sized;
@@ -46,6 +49,7 @@ public sealed class MainForm : Form
     bool disposed;
     int loadGeneration;
     int previewGeneration;
+    int analysisGeneration;
 
     public MainForm(string? startupPath)
     {
@@ -74,6 +78,7 @@ public sealed class MainForm : Form
             SetStatus("FFmpeg not found — install it or place ffmpeg.exe and ffprobe.exe beside this app.", StatusKind.Error);
         else
             SetStatus("Ready.", StatusKind.Info);
+        StartUpdateChecks();
     }
 
     void BuildUi()
@@ -107,6 +112,7 @@ public sealed class MainForm : Form
         body.Controls.Add(drop);
 
         bottom.Controls.Add(timeline);
+        bottom.Controls.Add(segmentStrip);
         bottom.Controls.Add(points);
         bottom.Controls.Add(exportBar);
 
@@ -116,6 +122,15 @@ public sealed class MainForm : Form
         Controls.Add(statusBar);
 
         toolbar.Open.Click += (_, _) => Browse();
+        toolbar.Snap.Click += (_, _) =>
+        {
+            toolbar.Snap.Selected = !toolbar.Snap.Selected;
+            timeline.SnapEnabled = toolbar.Snap.Selected;
+        };
+        segmentStrip.Split.Click += (_, _) => SplitSegment();
+        segmentStrip.New.Click += (_, _) => NewSegment();
+        segmentStrip.SelectRequested += (_, index) => { if (timeline.SelectSegment(index)) SchedulePreview(true); };
+        segmentStrip.RemoveRequested += (_, index) => RemoveSegment(index);
         timeline.ValuesChanged += (_, _) => OnTimelineChanged();
         timeline.InteractionEnded += (_, _) => OnTimelineInteractionEnded();
         preview.MouseWheel += OnWheel;
@@ -145,7 +160,10 @@ public sealed class MainForm : Form
         tips.SetToolTip(points.InLater, "One frame later");
         tips.SetToolTip(points.OutEarlier, "One frame earlier");
         tips.SetToolTip(points.OutLater, "One frame later");
-        tips.SetToolTip(timeline, "Drag the handles to trim. Drag the highlighted span to slide it. Click to move the playhead.");
+        tips.SetToolTip(timeline, "Drag the handles to trim; they snap to scene changes (amber) and silences (violet) — hold Ctrl to place freely. Drag the highlighted span to slide it. Double-click a dashed segment to edit it.");
+        tips.SetToolTip(segmentStrip.Split, "Split the segment under the playhead in two (S)");
+        tips.SetToolTip(segmentStrip.New, "Start a new segment at the playhead (N). Delete removes the active segment.");
+        tips.SetToolTip(toolbar.Snap, toolbar.Snap.AccessibleDescription);
         tips.SetToolTip(exportBar.Fast, ExportModeCopy.FastExplanation);
         tips.SetToolTip(exportBar.Exact, ExportModeCopy.ExactBaseExplanation);
         tips.SetToolTip(exportBar.QualityHigh, ExactExportPresets.Hint(ExactQuality.High));
@@ -162,7 +180,7 @@ public sealed class MainForm : Form
         if (sized) return;
         sized = true;
         MinimumSize = new Size(S(860), S(700));
-        Size = new Size(S(1180), S(800));
+        Size = new Size(S(1180), S(880));
         CenterToScreen();
         LayoutChrome();
     }
@@ -195,7 +213,15 @@ public sealed class MainForm : Form
         TryCancel(previewCts);
         TryCancel(filmCts);
         TryCancel(exportCts);
+        TryCancel(analysisCts);
+        StopUpdateChecks();
         base.OnFormClosing(e);
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        base.OnFormClosed(e);
+        LaunchPendingUpdate();
     }
 
     protected override void Dispose(bool disposing)
@@ -207,6 +233,7 @@ public sealed class MainForm : Form
             CancelAndDispose(previewCts);
             CancelAndDispose(filmCts);
             CancelAndDispose(exportCts);
+            CancelAndDispose(analysisCts);
             previewTimer.Stop();
             accurateTimer.Stop();
             filmTimer.Stop();
@@ -217,6 +244,8 @@ public sealed class MainForm : Form
             accurateTimer.Dispose();
             filmTimer.Dispose();
             tips.Dispose();
+            updateTimer.Dispose();
+            updateLifetime.Dispose();
         }
 
         base.Dispose(disposing);
@@ -289,6 +318,21 @@ public sealed class MainForm : Form
                 timeline.NudgeNearestEdge(1);
                 SchedulePreview(true);
                 return true;
+            case Keys.S:
+                SplitSegment();
+                return true;
+            case Keys.N:
+                NewSegment();
+                return true;
+            case Keys.Delete:
+            case Keys.Back:
+                RemoveSegment(timeline.ActiveIndex);
+                return true;
+            case Keys.Oemcomma:
+            case Keys.OemPeriod:
+                if (timeline.JumpToMarker(code == Keys.OemPeriod ? 1 : -1)) SchedulePreview(true);
+                else SetStatus(timeline.MarkerCount == 0 ? "No scene changes or silences found yet." : "No more cuts in that direction.", StatusKind.Info);
+                return true;
             default:
                 return base.ProcessCmdKey(ref msg, keyData);
         }
@@ -306,16 +350,18 @@ public sealed class MainForm : Form
             body.Padding = new Padding(S(16));
             playheadLabel.Height = S(28);
 
-            var timelineHeight = S(148);
+            var timelineHeight = S(184);
+            var stripHeight = S(32);
             var pointsHeight = S(34) + S(8) + S(34);
             var exportHeight = exportBar.MeasureHeight(narrowLayout);
-            var bottomHeight = S(12) + timelineHeight + S(8) + pointsHeight + S(8) + exportHeight + S(12);
+            var fixedHeight = S(12) + S(8) + stripHeight + S(8) + pointsHeight + S(8) + exportHeight + S(12);
+            var bottomHeight = timelineHeight + fixedHeight;
             var chrome = statusBar.Height + (toolbar.Visible ? toolbar.Height : 0);
             var previewRoom = ClientSize.Height - chrome - (bottom.Visible ? bottomHeight : 0);
             if (bottom.Visible && previewRoom < S(120))
             {
-                timelineHeight = Math.Max(S(96), timelineHeight - (S(120) - previewRoom));
-                bottomHeight = S(12) + timelineHeight + S(8) + pointsHeight + S(8) + exportHeight + S(12);
+                timelineHeight = Math.Max(S(112), timelineHeight - (S(120) - previewRoom));
+                bottomHeight = timelineHeight + fixedHeight;
             }
 
             bottom.Height = bottomHeight;
@@ -323,7 +369,8 @@ public sealed class MainForm : Form
             var gap = S(8);
             var width = Math.Max(10, bottom.ClientSize.Width - pad * 2);
             timeline.SetBounds(pad, pad, width, timelineHeight);
-            points.SetBounds(pad, timeline.Bottom + gap, width, pointsHeight);
+            segmentStrip.SetBounds(pad, timeline.Bottom + gap, width, stripHeight);
+            points.SetBounds(pad, segmentStrip.Bottom + gap, width, pointsHeight);
             exportBar.SetBounds(pad, points.Bottom + gap, width, exportHeight);
             exportBar.Arrange(narrowLayout);
             statusBar.PerformLayout();
@@ -409,7 +456,7 @@ public sealed class MainForm : Form
         {
             var media = await MediaProbe.ProbeAsync(runner, path, token);
             if (generation != loadGeneration || IsDisposed) return;
-            ApplyMedia(path, media.Duration, media.Fps, media.Frames);
+            ApplyMedia(path, media.Duration, media.Fps, media.Frames, media.HasAudio);
         }
         catch (OperationCanceledException)
         {
@@ -423,11 +470,12 @@ public sealed class MainForm : Form
         }
     }
 
-    void ApplyMedia(string path, double probedDuration, double probedFps, long frames)
+    void ApplyMedia(string path, double probedDuration, double probedFps, long frames, bool audio)
     {
         input = path;
         duration = probedDuration;
         fps = probedFps;
+        hasAudio = audio;
         CancelPreviewJobs();
         ClearPictures();
         timeline.Locked = false;
@@ -445,6 +493,7 @@ public sealed class MainForm : Form
         UpdateReadouts();
         SchedulePreview(true);
         StartFilmstrip(DesiredThumbCount());
+        StartAnalysis(path, probedDuration, audio);
         SetStatus("Building the filmstrip…", StatusKind.Busy);
     }
 
@@ -471,9 +520,13 @@ public sealed class MainForm : Form
             return;
         }
 
+        var all = timeline.AllSegments;
+        segmentStrip.SetSegments(all, timeline.ActiveIndex, timeline.Fps, timeline.TotalFrames);
+        exportBar.SetSegmentCount(timeline.ExportSegments.Count);
         var frames = timeline.OutFrame - timeline.InFrame;
         var unit = frames == 1 ? "frame" : "frames";
-        points.Selected.Text = $"Selected {TimeMath.Format(frames, timeline.Fps)}   ·   {frames:N0} {unit}";
+        var label = all.Count > 1 ? $"Segment {timeline.ActiveIndex + 1}" : "Selected";
+        points.Selected.Text = $"{label} {TimeMath.Format(frames, timeline.Fps)}   ·   {frames:N0} {unit}";
         playheadLabel.Text = $"{TimeMath.Format(timeline.PlayheadFrame, timeline.Fps)}    frame {timeline.PlayheadFrame:N0}";
     }
 
@@ -708,7 +761,9 @@ public sealed class MainForm : Form
 
         ReplaceCts(ref exportCts);
         var token = exportCts.Token;
+        var segments = timeline.ExportSegments;
         var mode = exact ? "Encoding exact frames" : "Saving fast copy";
+        if (segments.Count > 1) mode += $" of {segments.Count} segments";
         exporting = true;
         timeline.Locked = true;
         exportBar.Export.Enabled = false;
@@ -723,18 +778,37 @@ public sealed class MainForm : Form
         LayoutChrome();
         SetStatus(mode + "…", StatusKind.Busy);
         var exactOptions = exportBar.ExactOptions;
+        ExportPlan? plan = null;
         try
         {
-            var progress = new Progress<TimeSpan>(elapsed =>
+            plan = ExportService.Plan(input, output, segments, timeline.Fps, hasAudio, exact, exactOptions);
+            if (plan.WorkDirectory is not null)
             {
-                if (!exporting || IsDisposed) return;
-                var length = Math.Max(0.001, timeline.OutSeconds - timeline.InSeconds);
-                var fraction = Math.Clamp(elapsed.TotalSeconds / length, 0, 1);
-                statusBar.Progress.Fraction = fraction;
-                SetStatus($"{mode}… {(int)Math.Round(fraction * 100)}%", StatusKind.Busy);
-            });
-            var args = ExportService.BuildArguments(input, output, timeline.InSeconds, timeline.OutSeconds, exact, exactOptions);
-            await runner.RunAsync(runner.Ffmpeg, args, token, progress);
+                var work = Directory.CreateDirectory(plan.WorkDirectory);
+                work.Attributes |= FileAttributes.Hidden;
+                File.WriteAllText(plan.ListFile!, plan.ListText);
+            }
+
+            var totalWeight = Math.Max(0.001, plan.Steps.Sum(step => step.Weight));
+            var done = 0.0;
+            for (var i = 0; i < plan.Steps.Count; i++)
+            {
+                var step = plan.Steps[i];
+                var before = done;
+                var phase = plan.Steps.Count == 1 ? mode : i < plan.Steps.Count - 1 ? $"Copying segment {i + 1} of {plan.Steps.Count - 1}" : "Joining segments";
+                var progress = new Progress<TimeSpan>(elapsed =>
+                {
+                    if (!exporting || IsDisposed) return;
+                    var within = Math.Clamp(elapsed.TotalSeconds / Math.Max(0.001, step.Seconds), 0, 1);
+                    var fraction = Math.Clamp((before + within * step.Weight) / totalWeight, 0, 1);
+                    statusBar.Progress.Fraction = fraction;
+                    SetStatus($"{phase}… {(int)Math.Round(fraction * 100)}%", StatusKind.Busy);
+                });
+                SetStatus(phase + "…", StatusKind.Busy);
+                await runner.RunAsync(runner.Ffmpeg, step.Arguments, token, progress);
+                done += step.Weight;
+            }
+
             SetStatus("Saved: " + output, StatusKind.Good);
         }
         catch (OperationCanceledException)
@@ -748,6 +822,7 @@ public sealed class MainForm : Form
         }
         finally
         {
+            ExportService.TryDeleteDirectory(plan?.WorkDirectory);
             exporting = false;
             timeline.Locked = false;
             if (!IsDisposed)
@@ -769,6 +844,94 @@ public sealed class MainForm : Form
     {
         if (!exporting) return;
         exportCts.Cancel();
+    }
+
+    void SplitSegment()
+    {
+        if (!timeline.HasMedia || exporting) return;
+        if (timeline.SplitAtPlayhead())
+            SetStatus("Split. Drag a handle to open a gap, or select a piece and press Delete to cut it.", StatusKind.Info);
+        else
+            SetStatus("Move the playhead inside a segment (not on its edge) to split it.", StatusKind.Info);
+    }
+
+    void NewSegment()
+    {
+        if (!timeline.HasMedia || exporting) return;
+        if (timeline.NewSegmentAtPlayhead())
+        {
+            SetStatus("New segment. Set its out point with O or drag its handle.", StatusKind.Info);
+            SchedulePreview(true);
+        }
+        else
+        {
+            SetStatus("The whole video is already kept. Split a segment or trim one to make room.", StatusKind.Info);
+        }
+    }
+
+    void RemoveSegment(int index)
+    {
+        if (!timeline.HasMedia || exporting) return;
+        if (timeline.RemoveSegment(index))
+        {
+            SetStatus("Segment removed.", StatusKind.Info);
+            SchedulePreview(true);
+        }
+        else
+        {
+            SetStatus("The last segment can't be removed — trim it instead.", StatusKind.Info);
+        }
+    }
+
+    /// <summary>Reads the audio envelope (waveform and silences), then streams scene changes onto the timeline.</summary>
+    async void StartAnalysis(string path, double length, bool audio)
+    {
+        if (runner.Ffmpeg is null) return;
+        ReplaceCts(ref analysisCts);
+        var token = analysisCts.Token;
+        var generation = ++analysisGeneration;
+        bool Current() => generation == analysisGeneration && !IsDisposed;
+        void Note(string text)
+        {
+            if (!Current()) return;
+            timeline.LaneNote = text;
+            timeline.Invalidate();
+        }
+
+        try
+        {
+            if (audio)
+            {
+                Note("Reading audio…");
+                var audioProgress = new Progress<double>(p => Note($"Reading audio… {p:P0}"));
+                var envelope = await Task.Run(() => SmartAnalysis.ReadEnvelopeAsync(runner, path, length, audioProgress, token), token);
+                if (!Current()) return;
+                timeline.SetAudio(envelope, SmartAnalysis.FindSilences(envelope));
+            }
+
+            Note("Finding scene changes…");
+            var sceneProgress = new Progress<double>(p => Note($"{timeline.SilenceCount} silences · finding scene changes… {p:P0}"));
+            await Task.Run(() => SmartAnalysis.FindScenesAsync(runner, path, length, seconds =>
+            {
+                if (!IsHandleCreated || IsDisposed) return;
+                try { BeginInvoke(() => { if (Current()) timeline.AddScene(seconds); }); }
+                catch (InvalidOperationException) { /* The window closed. */ }
+            }, sceneProgress, token), token);
+            // Progress reports and scenes are still queued on the UI thread; queue the summary behind them.
+            BeginInvoke(() =>
+            {
+                var silences = audio ? $"{timeline.SilenceCount} silences" : "no audio track";
+                Note($"{timeline.SceneCount} scene changes · {silences}");
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer file replaced this one, or the app is closing.
+        }
+        catch (Exception ex)
+        {
+            Note("Scene and silence detection failed: " + ex.Message);
+        }
     }
 
     static void ReplaceCts(ref CancellationTokenSource cts)

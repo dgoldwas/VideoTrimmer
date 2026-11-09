@@ -397,6 +397,7 @@ sealed class ToolbarPanel : Panel
     public Label FileName { get; }
     public Label Meta { get; }
     public FlatButton Open { get; }
+    public OptionCard Snap { get; }
 
     public ToolbarPanel()
     {
@@ -419,8 +420,10 @@ sealed class ToolbarPanel : Panel
             AccessibleName = "Video details",
         };
         Open = new FlatButton { Text = "Open", AccessibleName = "Open" };
+        Snap = new OptionCard { Title = "Snap to cuts", Selected = true, AccessibleDescription = "Handles snap to scene changes and silences. Hold Ctrl while dragging to place them freely." };
         Controls.Add(FileName);
         Controls.Add(Meta);
+        Controls.Add(Snap);
         Controls.Add(Open);
     }
 
@@ -432,7 +435,9 @@ sealed class ToolbarPanel : Panel
         var buttonHeight = LogicalToDeviceUnits(32);
         var y = Math.Max(pad, (ClientSize.Height - buttonHeight) / 2);
         Open.SetBounds(Math.Max(pad, ClientSize.Width - pad - buttonWidth), y, buttonWidth, buttonHeight);
-        var textWidth = Math.Max(10, Open.Left - pad * 2);
+        var snapWidth = LogicalToDeviceUnits(136);
+        Snap.SetBounds(Math.Max(pad, Open.Left - LogicalToDeviceUnits(8) - snapWidth), y, snapWidth, buttonHeight);
+        var textWidth = Math.Max(10, Snap.Left - pad * 2);
         FileName.SetBounds(pad, LogicalToDeviceUnits(6), textWidth, LogicalToDeviceUnits(22));
         Meta.SetBounds(pad, FileName.Bottom, textWidth, LogicalToDeviceUnits(20));
     }
@@ -442,6 +447,8 @@ sealed class StatusBar : Panel
 {
     public Label Label { get; }
     public ThinProgress Progress { get; }
+    /// <summary>Shows the running version; becomes "Update to ..." when GitHub has a newer release.</summary>
+    public FlatButton UpdateButton { get; }
 
     public StatusBar()
     {
@@ -454,25 +461,34 @@ sealed class StatusBar : Panel
             AccessibleName = "Status",
         };
         Progress = new ThinProgress { AccessibleName = "Export progress" };
+        UpdateButton = new FlatButton { Font = Theme.Ui(8.5f), TextColor = Theme.Muted, AccessibleName = "Check for updates", TabStop = false };
         Controls.Add(Label);
         Controls.Add(Progress);
+        Controls.Add(UpdateButton);
     }
 
     protected override void OnLayout(LayoutEventArgs levent)
     {
         base.OnLayout(levent);
         var pad = LogicalToDeviceUnits(12);
+        var right = ClientSize.Width - LogicalToDeviceUnits(4);
+        if (UpdateButton.Visible)
+        {
+            var updateWidth = TextRenderer.MeasureText(UpdateButton.Text, UpdateButton.Font).Width + LogicalToDeviceUnits(20);
+            var updateHeight = Math.Max(1, ClientSize.Height - LogicalToDeviceUnits(6));
+            UpdateButton.SetBounds(right - updateWidth, (ClientSize.Height - updateHeight) / 2, updateWidth, updateHeight);
+            right = UpdateButton.Left - LogicalToDeviceUnits(8);
+        }
+
         if (Progress.Visible)
         {
             var progressWidth = LogicalToDeviceUnits(160);
             var progressHeight = LogicalToDeviceUnits(8);
-            Progress.SetBounds(ClientSize.Width - pad - progressWidth, Math.Max(0, (ClientSize.Height - progressHeight) / 2), progressWidth, progressHeight);
-            Label.SetBounds(pad, 0, Math.Max(10, Progress.Left - pad * 2), ClientSize.Height);
+            Progress.SetBounds(right - progressWidth, Math.Max(0, (ClientSize.Height - progressHeight) / 2), progressWidth, progressHeight);
+            right = Progress.Left - pad;
         }
-        else
-        {
-            Label.SetBounds(pad, 0, Math.Max(10, ClientSize.Width - pad * 2), ClientSize.Height);
-        }
+
+        Label.SetBounds(pad, 0, Math.Max(10, right - pad), ClientSize.Height);
     }
 }
 
@@ -578,6 +594,8 @@ sealed class ExportBar : Panel
     bool exactMode;
     ExactQuality quality = ExactExportOptions.Default.Quality;
     bool copyAudio;
+    int segments = 1;
+    bool optionsEnabled = true;
 
     public ExportBar()
     {
@@ -635,10 +653,20 @@ sealed class ExportBar : Panel
 
     public void SetExactOptionsEnabled(bool enabled)
     {
+        optionsEnabled = enabled;
         QualityHigh.Enabled = enabled;
         QualityBalanced.Enabled = enabled;
         QualitySmall.Enabled = enabled;
-        CopyAudio.Enabled = enabled;
+        // A multi-segment re-encode joins audio in a filter graph, so it cannot be copied.
+        CopyAudio.Enabled = enabled && segments == 1;
+    }
+
+    public void SetSegmentCount(int count)
+    {
+        if (segments == count) return;
+        segments = count;
+        SetExactOptionsEnabled(optionsEnabled);
+        RefreshExplanation();
     }
 
     public int MeasureHeight(bool narrowLayout)
@@ -674,7 +702,7 @@ sealed class ExportBar : Panel
 
     void SetCopyAudio(bool value)
     {
-        if (!exactMode || copyAudio == value) return;
+        if (!exactMode || copyAudio == value || segments > 1) return;
         copyAudio = value;
         SyncExactSelection();
         RefreshExplanation();
@@ -692,7 +720,7 @@ sealed class ExportBar : Panel
 
     void RefreshExplanation()
     {
-        Explanation.Text = ExportModeCopy.Explanation(exactMode, ExactOptions);
+        Explanation.Text = ExportModeCopy.Explanation(exactMode, ExactOptions, segments);
         Explanation.AccessibleName = Explanation.Text;
     }
 
@@ -755,5 +783,184 @@ sealed class ExportBar : Panel
         QualityBalanced.SetBounds(QualityHigh.Right + gap, y, cell, height);
         QualitySmall.SetBounds(QualityBalanced.Right + gap, y, Math.Max(40, qualityWidth - cell * 2 - gap * 2), height);
         CopyAudio.SetBounds(x + qualityWidth + gap, y, Math.Max(40, width - qualityWidth - gap), height);
+    }
+}
+
+/// <summary>
+/// The kept segments as chips (click to edit one, × to remove it), with Split and New buttons and the output length.
+/// </summary>
+sealed class SegmentStrip : Control
+{
+    readonly List<(int Index, Rectangle Chip, Rectangle Close)> hits = new();
+    IReadOnlyList<Segment> segments = [];
+    int active;
+    double fps = 30;
+    long total = 1;
+    int first;
+    int hover = -1;
+    bool hoverClose;
+
+    public FlatButton Split { get; }
+    public FlatButton New { get; }
+
+    public event EventHandler<int>? SelectRequested;
+    public event EventHandler<int>? RemoveRequested;
+
+    public SegmentStrip()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        BackColor = Theme.Background;
+        AccessibleName = "Segments";
+        AccessibleRole = AccessibleRole.List;
+        Split = new FlatButton { Text = "Split", AccessibleName = "Split the segment at the playhead" };
+        New = new FlatButton { Text = "+ Segment", AccessibleName = "Start a new segment at the playhead" };
+        Controls.Add(Split);
+        Controls.Add(New);
+    }
+
+    public void SetSegments(IReadOnlyList<Segment> all, int activeIndex, double framesPerSecond, long totalFrames)
+    {
+        segments = all;
+        active = activeIndex;
+        fps = framesPerSecond;
+        total = Math.Max(1, totalFrames);
+        first = Math.Clamp(first, 0, Math.Max(0, all.Count - 1));
+        if (active < first) first = active;
+        var kept = CutList.KeptFrames(CutList.Normalize(all, total));
+        var noun = all.Count == 1 ? "segment" : "segments";
+        AccessibleDescription = $"{all.Count} {noun}, {TimeMath.Format(kept, fps)} kept";
+        Invalidate();
+    }
+
+    protected override void OnLayout(LayoutEventArgs levent)
+    {
+        base.OnLayout(levent);
+        var gap = LogicalToDeviceUnits(8);
+        Split.SetBounds(0, 0, LogicalToDeviceUnits(64), ClientSize.Height);
+        New.SetBounds(Split.Right + gap, 0, LogicalToDeviceUnits(96), ClientSize.Height);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Theme.Background);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        hits.Clear();
+        if (segments.Count == 0) return;
+
+        var gap = LogicalToDeviceUnits(6);
+        var kept = CutList.KeptFrames(CutList.Normalize(segments, total));
+        var summary = segments.Count == 1
+            ? $"Keeps {TimeMath.Format(kept, fps)}"
+            : $"{segments.Count} segments  ·  {TimeMath.Format(kept, fps)} kept  ·  {TimeMath.Format(total - kept, fps)} cut";
+        var summaryFont = Theme.Ui(9.5f, FontStyle.Bold);
+        var summaryWidth = TextRenderer.MeasureText(summary, summaryFont).Width + LogicalToDeviceUnits(4);
+        var summaryRect = new Rectangle(Math.Max(0, ClientSize.Width - summaryWidth), 0, summaryWidth, ClientSize.Height);
+        TextRenderer.DrawText(g, summary, summaryFont, summaryRect, Theme.Text, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+
+        var left = New.Right + LogicalToDeviceUnits(12);
+        var right = summaryRect.Left - LogicalToDeviceUnits(12);
+        var more = LogicalToDeviceUnits(30);
+        var font = Theme.Mono(9);
+        var widths = segments.Select((s, i) => ChipWidth(Label(i, s), font)).ToArray();
+
+        // Keep the active chip in view; the mouse wheel scrolls the rest.
+        while (first < active && left + more + widths.Skip(first).Take(active - first + 1).Sum(w => w + gap) > right)
+            first++;
+        var x = left;
+        if (first > 0)
+            x += DrawMore(g, $"‹{first}", x);
+        for (var i = first; i < segments.Count; i++)
+        {
+            var reserve = i < segments.Count - 1 ? more : 0;
+            if (x + widths[i] > right - reserve && i > first)
+            {
+                DrawMore(g, $"{segments.Count - i}›", x);
+                break;
+            }
+
+            var chip = new Rectangle(x, LogicalToDeviceUnits(3), widths[i], ClientSize.Height - LogicalToDeviceUnits(6));
+            var close = segments.Count > 1
+                ? new Rectangle(chip.Right - LogicalToDeviceUnits(24), chip.Top, LogicalToDeviceUnits(22), chip.Height)
+                : Rectangle.Empty;
+            DrawChip(g, chip, close, Label(i, segments[i]), font, i == active, i == hover);
+            hits.Add((i, chip, close));
+            x = chip.Right + gap;
+        }
+    }
+
+    string Label(int index, Segment segment) =>
+        $"{index + 1}  {TimeMath.Format(segment.In, fps)}–{TimeMath.Format(segment.Out, fps)}";
+
+    int ChipWidth(string text, Font font) =>
+        TextRenderer.MeasureText(text, font).Width + LogicalToDeviceUnits(segments.Count > 1 ? 42 : 22);
+
+    int DrawMore(Graphics g, string text, int x)
+    {
+        var width = LogicalToDeviceUnits(30);
+        TextRenderer.DrawText(g, text, Theme.Ui(9), new Rectangle(x, 0, width, ClientSize.Height), Theme.Muted,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        return width;
+    }
+
+    void DrawChip(Graphics g, Rectangle chip, Rectangle close, string text, Font font, bool selected, bool hovered)
+    {
+        var fill = selected ? Theme.Mix(Theme.Surface, Theme.Accent, 0.35f) : hovered ? Theme.Lift(Theme.Surface, 12) : Theme.Surface;
+        using var path = PaintUtil.Rounded(new Rectangle(chip.X, chip.Y, chip.Width - 1, chip.Height - 1), chip.Height / 2);
+        using var brush = new SolidBrush(fill);
+        g.FillPath(brush, path);
+        using var pen = new Pen(selected ? Theme.Accent : Theme.Border, selected ? 2 : 1);
+        g.DrawPath(pen, path);
+        var textRect = new Rectangle(chip.X + LogicalToDeviceUnits(12), chip.Y, chip.Width - LogicalToDeviceUnits(12) - (close.IsEmpty ? LogicalToDeviceUnits(10) : close.Width + LogicalToDeviceUnits(2)), chip.Height);
+        TextRenderer.DrawText(g, text, font, textRect, Theme.Text, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        if (!close.IsEmpty)
+        {
+            var color = hovered && hoverClose ? Theme.OutPoint : Theme.Muted;
+            TextRenderer.DrawText(g, "×", Theme.Ui(11, FontStyle.Bold), close, color, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+    }
+
+    (int Index, bool Close) HitAt(Point point)
+    {
+        foreach (var (index, chip, close) in hits)
+            if (chip.Contains(point)) return (index, close.Contains(point));
+        return (-1, false);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        var (index, close) = HitAt(e.Location);
+        Cursor = index >= 0 ? Cursors.Hand : Cursors.Default;
+        if (index == hover && close == hoverClose) return;
+        hover = index;
+        hoverClose = close;
+        Invalidate();
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        hover = -1;
+        Invalidate();
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        if (e.Button != MouseButtons.Left) return;
+        var (index, close) = HitAt(e.Location);
+        if (index < 0) return;
+        if (close) RemoveRequested?.Invoke(this, index);
+        else SelectRequested?.Invoke(this, index);
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        var next = Math.Clamp(first + (e.Delta > 0 ? -1 : 1), 0, Math.Max(0, segments.Count - 1));
+        if (next == first) return;
+        first = next;
+        Invalidate();
     }
 }

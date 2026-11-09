@@ -74,6 +74,46 @@ sealed class FfmpegRunner
         return buffer.ToArray();
     }
 
+    /// <summary>
+    /// Runs a long analysis pass: <paramref name="readStdout"/> consumes stdout as it arrives, and each stderr line
+    /// goes to <paramref name="onStderrLine"/> (FFmpeg filters such as scdet log their results there).
+    /// </summary>
+    public async Task StreamAsync(
+        string executable,
+        IReadOnlyList<string> arguments,
+        Func<Stream, CancellationToken, Task> readStdout,
+        Action<string>? onStderrLine,
+        CancellationToken cancellationToken)
+    {
+        using var process = Start(executable, arguments, binaryStdout: true);
+        var tail = new Queue<string>();
+        var stderrTask = Task.Run(async () =>
+        {
+            while (await process.StandardError.ReadLineAsync().ConfigureAwait(false) is { } line)
+            {
+                onStderrLine?.Invoke(line);
+                if (tail.Count == 8) tail.Dequeue();
+                tail.Enqueue(line);
+            }
+        });
+        try
+        {
+            await readStdout(process.StandardOutput.BaseStream, cancellationToken).ConfigureAwait(false);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            TryKill(process);
+            throw;
+        }
+        finally
+        {
+            try { await stderrTask.ConfigureAwait(false); } catch { /* The pipe closes when the process is killed. */ }
+        }
+
+        EnsureSuccess(process, string.Join("\n", tail), cancellationToken);
+    }
+
     static Process Start(string executable, IReadOnlyList<string> arguments, bool binaryStdout)
     {
         var process = new Process();
@@ -141,7 +181,7 @@ sealed class FfmpegRunner
     }
 
     // ffmpeg writes out_time as HH:MM:SS.microseconds on the progress pipe.
-    static bool TryParseProgress(string line, out TimeSpan time)
+    public static bool TryParseProgress(string line, out TimeSpan time)
     {
         time = TimeSpan.Zero;
         const string prefix = "out_time=";

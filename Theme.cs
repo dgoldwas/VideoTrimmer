@@ -12,6 +12,9 @@ static class Theme
     public static readonly Color Accent = Color.FromArgb(76, 141, 255);
     public static readonly Color InPoint = Color.FromArgb(61, 220, 151);
     public static readonly Color OutPoint = Color.FromArgb(255, 107, 107);
+    public static readonly Color Scene = Color.FromArgb(255, 196, 61);
+    public static readonly Color Silence = Color.FromArgb(167, 139, 250);
+    public static readonly Color Wave = Color.FromArgb(120, 178, 255);
 
     static readonly Dictionary<string, Font> fonts = new();
 

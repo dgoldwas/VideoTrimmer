@@ -1,5 +1,15 @@
 # Updates
 
+## 2026-11-09 (2026.11.09.01)
+
+- **Multi-cut:** the timeline holds several kept segments. `S` splits at the playhead, `N` starts a new segment, and `Delete` removes the active one. A segment strip lists them as chips and shows the kept and cut totals. Cut regions are dimmed and hatched.
+- Multi-segment export: fast copy copies each part and joins them with the concat demuxer. Exact frames uses one `trim`/`atrim` + `concat` re-encode. A single segment keeps the previous arguments exactly.
+- **Smart timeline:** a waveform lane under the filmstrip, with silence spans (-40 dBFS, at least 0.4 s) and `scdet` scene changes found in the background. Handles snap to them, Ctrl overrides, and there is a **Snap to cuts** toggle. `,` and `.` jump between them.
+- Installer: `build-installer.ps1` builds an Inno Setup installer for `C:\Program Files\VideoTrimmer`, with a pinned GPL FFmpeg (libx264), a Start menu entry, and an **Open with** registration. `-Install` and `-Release` install it or publish it to GitHub.
+- Auto-update: the status bar's version button checks GitHub releases at startup and every six hours. It downloads and verifies the Setup.exe, installs after VideoTrimmer exits, and reopens the same video.
+- Versioning: `<Version>` in the project (YYYY.MM.DD.##) is the single source. Added an app icon.
+- `--check` now also covers segment merging, export plans, silence detection, scdet parsing, and release parsing.
+
 ## 2026-11-03
 
 - Refactored the app into focused modules: `Theme`, `TimeMath`, `TimelineControl`, `UiControls`, and `FfmpegRunner`.
@@ -27,11 +37,11 @@
 
 ## Packaging notes
 
-The current source targets Windows and .NET 8 WinForms. The portable build is a self-contained single-file `win-x64` publish staged under `publish\win-x64\` with `ffmpeg.exe` and `ffprobe.exe` beside `VideoTrimmer.exe` (that folder is gitignored).
+The current source targets Windows and .NET 8 WinForms. Releases are built with `build-installer.ps1` (see the README's Releases section) into `artifacts\` (gitignored). The older portable single-file build still works and is staged under `publish\win-x64\` with `ffmpeg.exe` and `ffprobe.exe` beside `VideoTrimmer.exe` (that folder is gitignored).
 
 ```powershell
 dotnet publish .\VideoTrimmer.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o .\publish\win-x64
 Copy-Item .\tools\ffmpeg.exe, .\tools\ffprobe.exe .\publish\win-x64\ -Force
 ```
 
-No installer or automated release workflow is included yet.
+GitHub releases are published from a local machine with `build-installer.ps1 -Release`; there is no CI release workflow.

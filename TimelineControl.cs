@@ -3,18 +3,31 @@ using System.Drawing.Text;
 
 namespace VideoTrimmer;
 
+/// <summary>
+/// The filmstrip with its kept segments, audio waveform lane, and scene/silence markers.
+/// One segment is active: its in and out handles are the ones the user edits. The others are drawn as kept blocks.
+/// </summary>
 sealed class TimelineControl : Control
 {
     enum DragKind { None, Playhead, InHandle, OutHandle, Span }
     enum HitKind { None, InHandle, OutHandle, Selection, Film }
 
     static readonly SolidBrush SurfaceBrush = new(Theme.Surface);
-    static readonly SolidBrush DimBrush = new(Color.FromArgb(150, 16, 18, 22));
+    static readonly SolidBrush LaneBrush = new(Theme.Darken(Theme.Surface, 8));
+    static readonly SolidBrush DimBrush = new(Color.FromArgb(170, 16, 18, 22));
+    static readonly HatchBrush CutHatch = new(HatchStyle.WideDownwardDiagonal, Color.FromArgb(46, Theme.OutPoint), Color.Transparent);
     static readonly SolidBrush TagBackgroundBrush = new(Color.FromArgb(210, 16, 18, 22));
     static readonly SolidBrush PlayheadBrush = new(Theme.Text);
     static readonly SolidBrush GripBrush = new(Color.FromArgb(180, 16, 18, 22));
+    static readonly SolidBrush WaveBrush = new(Theme.Wave);
+    static readonly SolidBrush SilenceBrush = new(Color.FromArgb(70, Theme.Silence));
+    static readonly SolidBrush SceneBrush = new(Theme.Scene);
+    static readonly Pen SceneLinePen = new(Color.FromArgb(210, Theme.Scene), 2);
+    static readonly Pen SilenceEdgePen = new(Color.FromArgb(150, Theme.Silence), 1);
     static readonly Pen BorderPen = new(Theme.Border);
+    static readonly Pen LaneLinePen = new(Theme.Border);
     static readonly Pen SelectionPen = new(Theme.Accent, 2);
+    static readonly Pen KeptPen = new(Color.FromArgb(170, Theme.Accent), 2) { DashStyle = DashStyle.Dash };
     static readonly Pen PlayheadPen = new(Theme.Text, 2);
 
     Bitmap?[]? strip;
@@ -24,12 +37,20 @@ sealed class TimelineControl : Control
     long inFrame;
     long outFrame;
     long playhead;
+    readonly List<Segment> others = new();
     DragKind drag = DragKind.None;
     Point dragStart;
     long spanAnchorIn;
     long spanAnchorOut;
     long spanAnchorFrame;
     bool dragMoved;
+
+    float[]? envelope;
+    float[]? waveColumns;
+    int waveColumnsWidth;
+    readonly List<Silence> silences = new();
+    readonly List<long> scenes = new();
+    long[] snapPoints = [];
 
     public TimelineControl()
     {
@@ -46,12 +67,29 @@ sealed class TimelineControl : Control
     public bool IsDragging => drag != DragKind.None;
     public bool Locked { get; set; }
     public string Placeholder { get; set; } = "";
+    /// <summary>Text shown in the waveform lane while analysis runs, or why there is no waveform.</summary>
+    public string LaneNote { get; set; } = "";
+    public bool SnapEnabled { get; set; } = true;
     public double Fps => fps;
+    public long TotalFrames => totalFrames;
     public long InFrame => inFrame;
     public long OutFrame => outFrame;
     public long PlayheadFrame => playhead;
     public double InSeconds => Seconds(inFrame);
     public double OutSeconds => Seconds(outFrame);
+    public int MarkerCount => snapPoints.Length;
+    public int SceneCount => scenes.Count;
+    public int SilenceCount => silences.Count;
+
+    Segment Active => new(inFrame, outFrame);
+
+    /// <summary>Every segment in time order, including the active one. Touching segments stay separate here.</summary>
+    public IReadOnlyList<Segment> AllSegments => others.Append(Active).OrderBy(s => s.In).ToList();
+
+    public int ActiveIndex => others.Count(s => s.In < inFrame);
+
+    /// <summary>What the export keeps: sorted, with touching segments joined.</summary>
+    public IReadOnlyList<Segment> ExportSegments => CutList.Normalize(others.Append(Active), totalFrames);
 
     public double PlayheadSeconds
     {
@@ -93,15 +131,48 @@ sealed class TimelineControl : Control
         inFrame = 0;
         outFrame = totalFrames;
         playhead = 0;
+        others.Clear();
         strip = null;
         drag = DragKind.None;
-        Invalidate();
+        ClearAnalysis();
         NotifyValues();
     }
 
     public void UseStrip(Bitmap?[]? images)
     {
         strip = images;
+        Invalidate();
+    }
+
+    public void ClearAnalysis()
+    {
+        envelope = null;
+        waveColumns = null;
+        silences.Clear();
+        scenes.Clear();
+        snapPoints = [];
+        LaneNote = "";
+        Invalidate();
+    }
+
+    public void SetAudio(float[]? levels, IEnumerable<Silence> found)
+    {
+        envelope = levels;
+        waveColumns = null;
+        silences.Clear();
+        silences.AddRange(found);
+        RebuildSnapPoints();
+        Invalidate();
+    }
+
+    public void AddScene(double seconds)
+    {
+        var frame = (long)Math.Round(seconds * fps, MidpointRounding.AwayFromZero);
+        if (frame <= 0 || frame >= totalFrames) return;
+        var index = scenes.BinarySearch(frame);
+        if (index >= 0) return;
+        scenes.Insert(~index, frame);
+        RebuildSnapPoints();
         Invalidate();
     }
 
@@ -183,6 +254,95 @@ sealed class TimelineControl : Control
         NotifyValues();
     }
 
+    /// <summary>Moves the playhead to the next (or previous) scene change or silence edge.</summary>
+    public bool JumpToMarker(int direction)
+    {
+        if (!HasMedia || Locked || snapPoints.Length == 0) return false;
+        long? target = direction > 0
+            ? snapPoints.Where(p => p > playhead).Cast<long?>().FirstOrDefault()
+            : snapPoints.Where(p => p < playhead).Cast<long?>().LastOrDefault();
+        if (target is null) return false;
+        playhead = Math.Clamp(target.Value, 0, totalFrames - 1);
+        NotifyValues();
+        return true;
+    }
+
+    /// <summary>Splits the segment under the playhead in two. The right half becomes active.</summary>
+    public bool SplitAtPlayhead()
+    {
+        if (!HasMedia || Locked) return false;
+        if (playhead > inFrame && playhead < outFrame)
+        {
+            others.Add(new Segment(inFrame, playhead));
+            inFrame = playhead;
+            NotifyValues();
+            return true;
+        }
+
+        var index = others.FindIndex(s => playhead > s.In && playhead < s.Out);
+        if (index < 0) return false;
+        var target = others[index];
+        others.RemoveAt(index);
+        others.Add(Active);
+        others.Add(new Segment(target.In, playhead));
+        (inFrame, outFrame) = (playhead, target.Out);
+        NotifyValues();
+        return true;
+    }
+
+    /// <summary>Starts a new active segment at the playhead that runs to the next kept segment or the end.</summary>
+    public bool NewSegmentAtPlayhead()
+    {
+        if (!HasMedia || Locked) return false;
+        var gaps = CutList.Gaps(CutList.Normalize(others.Append(Active), totalFrames), totalFrames);
+        if (gaps.Count == 0) return false;
+        var gap = gaps.FirstOrDefault(g => g.Contains(playhead));
+        if (gap.Length == 0) gap = gaps.FirstOrDefault(g => g.In > playhead);
+        if (gap.Length == 0) gap = gaps[^1];
+        var start = gap.Contains(playhead) ? playhead : gap.In;
+        others.Add(Active);
+        (inFrame, outFrame) = (start, gap.Out);
+        playhead = start;
+        NotifyValues();
+        return true;
+    }
+
+    public bool SelectSegment(int index)
+    {
+        if (!HasMedia || Locked) return false;
+        var all = AllSegments;
+        if (index < 0 || index >= all.Count || index == ActiveIndex) return false;
+        var target = all[index];
+        others.Remove(target);
+        others.Add(Active);
+        (inFrame, outFrame) = (target.In, target.Out);
+        playhead = inFrame;
+        NotifyValues();
+        return true;
+    }
+
+    /// <summary>Removes a segment. The last segment cannot be removed.</summary>
+    public bool RemoveSegment(int index)
+    {
+        if (!HasMedia || Locked || others.Count == 0) return false;
+        var all = AllSegments;
+        if (index < 0 || index >= all.Count) return false;
+        if (index != ActiveIndex)
+        {
+            others.Remove(all[index]);
+            NotifyValues();
+            return true;
+        }
+
+        // The active one goes: the next segment (or the previous one at the end) takes over.
+        var replacement = index + 1 < all.Count ? all[index + 1] : all[index - 1];
+        others.Remove(replacement);
+        (inFrame, outFrame) = (replacement.In, replacement.Out);
+        playhead = inFrame;
+        NotifyValues();
+        return true;
+    }
+
     public int FramesInOneSecond() => TimeMath.RoundedFps(fps);
 
     protected override void OnPaint(PaintEventArgs e)
@@ -194,6 +354,8 @@ sealed class TimelineControl : Control
         g.InterpolationMode = InterpolationMode.Bilinear;
         g.PixelOffsetMode = PixelOffsetMode.Half;
         var film = FilmRect();
+        var lane = LaneRect();
+        var track = TrackRect();
         g.FillRectangle(SurfaceBrush, film);
 
         if (strip is { Length: > 0 })
@@ -219,23 +381,45 @@ sealed class TimelineControl : Control
             return;
         }
 
+        DrawLane(g, lane);
+        DrawScenes(g, film);
+
+        // Everything outside the kept segments is cut: dim it and hatch it.
+        foreach (var gap in CutList.Gaps(CutList.Normalize(others.Append(Active), totalFrames), totalFrames))
+        {
+            var left = XOf(gap.In);
+            var right = XOf(gap.Out);
+            if (right <= left) continue;
+            g.FillRectangle(DimBrush, left, track.Top, right - left, track.Height);
+            g.FillRectangle(CutHatch, left, track.Top, right - left, track.Height);
+        }
+
+        var all = AllSegments;
+        var numbered = all.Count > 1;
+        var active = ActiveIndex;
+        for (var i = 0; i < all.Count; i++)
+        {
+            if (i == active) continue;
+            var x1 = XOf(all[i].In);
+            var x2 = XOf(all[i].Out);
+            g.DrawRectangle(KeptPen, x1, track.Top + 1, Math.Max(1, x2 - x1), track.Height - 3);
+            if (numbered) DrawBadge(g, (i + 1).ToString(), x1, x2, film, selected: false);
+        }
+
         var inX = XOf(inFrame);
         var outX = XOf(outFrame);
-        if (inX > film.Left)
-            g.FillRectangle(DimBrush, film.Left, film.Top, inX - film.Left, film.Height);
-        if (outX < film.Right)
-            g.FillRectangle(DimBrush, outX, film.Top, film.Right - outX, film.Height);
-
         if (outX > inX)
-            g.DrawRectangle(SelectionPen, inX, film.Top + 1, outX - inX, film.Height - 3);
+            g.DrawRectangle(SelectionPen, inX, track.Top + 1, outX - inX, track.Height - 3);
+        if (numbered) DrawBadge(g, (active + 1).ToString(), inX, outX, film, selected: true);
 
-        DrawHandle(g, inX, film, Theme.InPoint);
-        DrawHandle(g, outX, film, Theme.OutPoint);
-        DrawPlayhead(g, XOf(Math.Clamp(playhead, 0, totalFrames)), film);
+        DrawHandle(g, inX, track, Theme.InPoint);
+        DrawHandle(g, outX, track, Theme.OutPoint);
+        DrawPlayhead(g, XOf(Math.Clamp(playhead, 0, totalFrames)), track);
         DrawRangeTags(g, film, inX, outX);
-        DrawBorder(g, film);
+        DrawLaneNote(g, lane);
+        DrawBorder(g, track);
         if (Focused && ShowFocusCues)
-            ControlPaint.DrawFocusRectangle(g, Rectangle.Inflate(film, 3, 3));
+            ControlPaint.DrawFocusRectangle(g, Rectangle.Inflate(track, 3, 3));
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -273,9 +457,21 @@ sealed class TimelineControl : Control
             return;
         }
 
-        ApplyPointer(frame, shift, alt);
+        ApplyPointer(Snap(frame, e.X), shift, alt);
         drag = DragKind.Playhead;
         Capture = true;
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        base.OnMouseDoubleClick(e);
+        if (!HasMedia || Locked || e.Button != MouseButtons.Left) return;
+        // Double-click a kept segment to make it the one the handles edit.
+        var frame = FrameAt(e.X);
+        var all = AllSegments;
+        var index = all.ToList().FindIndex(s => s.Contains(frame));
+        if (index >= 0 && index != ActiveIndex && SelectSegment(index))
+            InteractionEnded?.Invoke(this, EventArgs.Empty);
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -296,12 +492,12 @@ sealed class TimelineControl : Control
         switch (drag)
         {
             case DragKind.InHandle:
-                inFrame = TimeMath.StickIn(frame, outFrame, totalFrames);
+                inFrame = TimeMath.StickIn(Snap(frame, e.X), outFrame, totalFrames);
                 playhead = inFrame;
                 NotifyValues();
                 break;
             case DragKind.OutHandle:
-                outFrame = TimeMath.StickOut(frame, inFrame, totalFrames);
+                outFrame = TimeMath.StickOut(Snap(frame, e.X), inFrame, totalFrames);
                 playhead = Math.Max(inFrame, outFrame - 1);
                 NotifyValues();
                 break;
@@ -311,7 +507,7 @@ sealed class TimelineControl : Control
                 NotifyValues();
                 break;
             case DragKind.Playhead:
-                playhead = Math.Clamp(frame, 0, totalFrames - 1);
+                playhead = Math.Clamp(Snap(frame, e.X), 0, totalFrames - 1);
                 NotifyValues();
                 break;
         }
@@ -352,12 +548,19 @@ sealed class TimelineControl : Control
         if (drag == DragKind.None) Cursor = Cursors.Hand;
     }
 
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        waveColumns = null;
+    }
+
     void FinishDrag()
     {
         if (drag == DragKind.None) return;
         drag = DragKind.None;
         if (Capture) Capture = false;
         Cursor = Cursors.Hand;
+        if (AbsorbOverlaps()) NotifyValues();
         InteractionEnded?.Invoke(this, EventArgs.Empty);
     }
 
@@ -371,17 +574,75 @@ sealed class TimelineControl : Control
 
     void NotifyValues()
     {
+        // Merge on settle rather than mid-drag, so dragging across a neighbor does not swallow it until release.
+        if (drag == DragKind.None) AbsorbOverlaps();
         var description = HasMedia
-            ? $"In {TimeMath.Format(inFrame, fps)}, out {TimeMath.Format(outFrame, fps)}, playhead {TimeMath.Format(playhead, fps)}"
+            ? $"Segment {ActiveIndex + 1} of {others.Count + 1}: in {TimeMath.Format(inFrame, fps)}, out {TimeMath.Format(outFrame, fps)}, playhead {TimeMath.Format(playhead, fps)}"
             : "No video";
         AccessibleDescription = description;
         Invalidate();
         ValuesChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    /// <summary>Joins any kept segment the active one now overlaps into the active one.</summary>
+    bool AbsorbOverlaps()
+    {
+        var changed = false;
+        while (true)
+        {
+            var index = others.FindIndex(s => s.Overlaps(Active));
+            if (index < 0) return changed;
+            var other = others[index];
+            others.RemoveAt(index);
+            inFrame = Math.Min(inFrame, other.In);
+            outFrame = Math.Max(outFrame, other.Out);
+            changed = true;
+        }
+    }
+
+    /// <summary>Pulls a dragged frame onto a nearby scene change or silence edge. Hold Ctrl to place it freely.</summary>
+    long Snap(long frame, int x)
+    {
+        if (!SnapEnabled || snapPoints.Length == 0 || (ModifierKeys & Keys.Control) == Keys.Control) return frame;
+        var index = Array.BinarySearch(snapPoints, frame);
+        if (index >= 0) return frame;
+        index = ~index;
+        var reach = Math.Max(6, LogicalToDeviceUnits(7));
+        long? best = null;
+        var bestDistance = int.MaxValue;
+        foreach (var candidate in new[] { index - 1, index })
+        {
+            if (candidate < 0 || candidate >= snapPoints.Length) continue;
+            var distance = Math.Abs(XOf(snapPoints[candidate]) - x);
+            if (distance <= reach && distance < bestDistance)
+            {
+                best = snapPoints[candidate];
+                bestDistance = distance;
+            }
+        }
+
+        return best ?? frame;
+    }
+
+    void RebuildSnapPoints()
+    {
+        var points = new SortedSet<long>(scenes);
+        foreach (var silence in silences)
+        {
+            points.Add(FrameOfSeconds(silence.Start));
+            points.Add(FrameOfSeconds(silence.End));
+        }
+
+        points.RemoveWhere(p => p <= 0 || p >= totalFrames);
+        snapPoints = points.ToArray();
+    }
+
+    long FrameOfSeconds(double seconds) => (long)Math.Round(seconds * fps, MidpointRounding.AwayFromZero);
+
     double Seconds(long frame) => fps <= 0 ? 0 : frame / fps;
 
-    Rectangle FilmRect()
+    /// <summary>The thumbnails, plus the waveform lane beneath them once a clip is loaded.</summary>
+    Rectangle TrackRect()
     {
         var pad = LogicalToDeviceUnits(2);
         var rect = ClientRectangle;
@@ -389,6 +650,27 @@ sealed class TimelineControl : Control
         if (rect.Width < 1) rect.Width = 1;
         if (rect.Height < 1) rect.Height = 1;
         return rect;
+    }
+
+    int LaneHeight()
+    {
+        if (!HasMedia) return 0;
+        var track = TrackRect();
+        return Math.Clamp(track.Height / 4, LogicalToDeviceUnits(22), LogicalToDeviceUnits(40));
+    }
+
+    Rectangle FilmRect()
+    {
+        var track = TrackRect();
+        track.Height = Math.Max(1, track.Height - LaneHeight());
+        return track;
+    }
+
+    Rectangle LaneRect()
+    {
+        var track = TrackRect();
+        var height = LaneHeight();
+        return new Rectangle(track.Left, track.Bottom - height, track.Width, height);
     }
 
     long FrameAt(int x)
@@ -406,6 +688,8 @@ sealed class TimelineControl : Control
         var ratio = Math.Clamp(frame / (double)totalFrames, 0, 1);
         return film.Left + (int)Math.Round(ratio * film.Width, MidpointRounding.AwayFromZero);
     }
+
+    int XOfSeconds(double seconds) => XOf(FrameOfSeconds(seconds));
 
     HitKind HitTest(int x)
     {
@@ -431,23 +715,118 @@ sealed class TimelineControl : Control
         _ => Cursors.Hand,
     };
 
-    void DrawHandle(Graphics graphics, int x, Rectangle film, Color color)
+    void DrawLane(Graphics graphics, Rectangle lane)
+    {
+        if (lane.Height <= 0) return;
+        graphics.FillRectangle(LaneBrush, lane);
+        graphics.DrawLine(LaneLinePen, lane.Left, lane.Top, lane.Right, lane.Top);
+
+        foreach (var silence in silences)
+        {
+            var left = XOfSeconds(silence.Start);
+            var right = Math.Max(left + 1, XOfSeconds(silence.End));
+            graphics.FillRectangle(SilenceBrush, left, lane.Top, right - left, lane.Height);
+            graphics.DrawLine(SilenceEdgePen, left, lane.Top, left, lane.Bottom);
+            graphics.DrawLine(SilenceEdgePen, right, lane.Top, right, lane.Bottom);
+        }
+
+        var columns = WaveColumns(lane.Width);
+        if (columns is not null)
+        {
+            var middle = lane.Top + lane.Height / 2f;
+            var half = (lane.Height - LogicalToDeviceUnits(6)) / 2f;
+            for (var i = 0; i < columns.Length; i++)
+            {
+                var height = Math.Max(1, columns[i] * half);
+                graphics.FillRectangle(WaveBrush, lane.Left + i, middle - height, 1, height * 2);
+            }
+        }
+    }
+
+    /// <summary>Analysis progress or results, drawn last so the cut overlay does not dim it.</summary>
+    void DrawLaneNote(Graphics graphics, Rectangle lane)
+    {
+        if (lane.Height <= 0 || string.IsNullOrWhiteSpace(LaneNote)) return;
+        var font = Theme.Ui(8.5f);
+        var size = TextRenderer.MeasureText(LaneNote, font);
+        var width = Math.Min(lane.Width - LogicalToDeviceUnits(16), size.Width + LogicalToDeviceUnits(12));
+        var height = Math.Min(lane.Height - 2, size.Height + LogicalToDeviceUnits(2));
+        var note = new Rectangle(lane.Right - width - LogicalToDeviceUnits(16), lane.Top + (lane.Height - height) / 2, width, height);
+        graphics.FillRectangle(TagBackgroundBrush, note);
+        TextRenderer.DrawText(graphics, LaneNote, font, note, Theme.Text,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    /// <summary>The loudest window under each pixel column, cached per width.</summary>
+    float[]? WaveColumns(int width)
+    {
+        if (envelope is not { Length: > 0 } || width <= 0 || duration <= 0) return null;
+        if (waveColumns is not null && waveColumnsWidth == width) return waveColumns;
+        var columns = new float[width];
+        var windowsPerSecond = 1 / SmartAnalysis.WindowSeconds;
+        for (var x = 0; x < width; x++)
+        {
+            var start = (int)(x / (double)width * duration * windowsPerSecond);
+            var end = Math.Max(start + 1, (int)((x + 1) / (double)width * duration * windowsPerSecond));
+            var peak = 0f;
+            for (var i = start; i < end && i < envelope.Length; i++)
+                peak = Math.Max(peak, envelope[i]);
+            columns[x] = SmartAnalysis.DisplayLevel(peak);
+        }
+
+        waveColumns = columns;
+        waveColumnsWidth = width;
+        return columns;
+    }
+
+    void DrawScenes(Graphics graphics, Rectangle film)
+    {
+        if (scenes.Count == 0) return;
+        var size = Math.Max(4, LogicalToDeviceUnits(5));
+        int? lastX = null;
+        foreach (var scene in scenes)
+        {
+            var x = XOf(scene);
+            if (x - lastX < 2) continue;
+            lastX = x;
+            graphics.DrawLine(SceneLinePen, x, film.Top, x, film.Bottom);
+            Point[] diamond = [new(x, film.Bottom - size * 2), new(x + size, film.Bottom - size), new(x, film.Bottom), new(x - size, film.Bottom - size)];
+            graphics.FillPolygon(SceneBrush, diamond);
+        }
+    }
+
+    void DrawBadge(Graphics graphics, string text, int left, int right, Rectangle film, bool selected)
+    {
+        var font = Theme.Ui(8, FontStyle.Bold);
+        var size = TextRenderer.MeasureText(text, font);
+        var width = Math.Max(size.Width + LogicalToDeviceUnits(6), LogicalToDeviceUnits(18));
+        var height = size.Height + LogicalToDeviceUnits(2);
+        if (right - left < width + LogicalToDeviceUnits(8)) return;
+        var rect = new Rectangle(left + LogicalToDeviceUnits(6), film.Bottom - height - LogicalToDeviceUnits(6), width, height);
+        using var path = PaintUtil.Rounded(rect, height / 2);
+        using var brush = new SolidBrush(selected ? Theme.Accent : Color.FromArgb(220, Theme.Surface));
+        graphics.FillPath(brush, path);
+        TextRenderer.DrawText(graphics, text, font, rect, selected ? Color.White : Theme.Text,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+    }
+
+    void DrawHandle(Graphics graphics, int x, Rectangle track, Color color)
     {
         var width = Math.Max(8, LogicalToDeviceUnits(10));
-        var rect = new Rectangle(x - width / 2, film.Top, width, film.Height);
+        var rect = new Rectangle(x - width / 2, track.Top, width, track.Height);
         using var brush = new SolidBrush(color);
         graphics.FillRectangle(brush, rect);
-        var middle = film.Top + film.Height / 2;
+        var middle = track.Top + track.Height / 2;
         var gap = LogicalToDeviceUnits(5);
         for (var i = -1; i <= 1; i++)
             graphics.FillEllipse(GripBrush, x - 2, middle + i * gap - 2, 4, 4);
     }
 
-    static void DrawPlayhead(Graphics graphics, int x, Rectangle film)
+    static void DrawPlayhead(Graphics graphics, int x, Rectangle track)
     {
-        Point[] head = [new Point(x - 6, film.Top), new Point(x + 6, film.Top), new Point(x, film.Top + 9)];
+        Point[] head = [new Point(x - 6, track.Top), new Point(x + 6, track.Top), new Point(x, track.Top + 9)];
         graphics.FillPolygon(PlayheadBrush, head);
-        graphics.DrawLine(PlayheadPen, x, film.Top, x, film.Bottom);
+        graphics.DrawLine(PlayheadPen, x, track.Top, x, track.Bottom);
     }
 
     void DrawRangeTags(Graphics graphics, Rectangle film, int inX, int outX)
@@ -512,9 +891,9 @@ sealed class TimelineControl : Control
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
 
-    static void DrawBorder(Graphics graphics, Rectangle film)
+    static void DrawBorder(Graphics graphics, Rectangle rect)
     {
-        graphics.DrawRectangle(BorderPen, film.X, film.Y, film.Width - 1, film.Height - 1);
+        graphics.DrawRectangle(BorderPen, rect.X, rect.Y, rect.Width - 1, rect.Height - 1);
     }
 
     static void DrawCover(Graphics graphics, Image image, RectangleF slot)

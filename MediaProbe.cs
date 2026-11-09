@@ -3,7 +3,7 @@ using System.Text.Json;
 
 namespace VideoTrimmer;
 
-readonly record struct MediaInfo(double Duration, double Fps, long Frames);
+readonly record struct MediaInfo(double Duration, double Fps, long Frames, bool HasAudio);
 
 static class MediaProbe
 {
@@ -31,6 +31,8 @@ static class MediaProbe
             .FirstOrDefault(stream => stream.ValueKind == JsonValueKind.Object && stream.TryGetProperty("codec_type", out var kind) && kind.GetString() == "video");
         if (video.ValueKind == JsonValueKind.Undefined)
             throw new InvalidOperationException("The file does not contain a video stream.");
+        var hasAudio = root.GetProperty("streams").EnumerateArray()
+            .Any(stream => stream.ValueKind == JsonValueKind.Object && stream.TryGetProperty("codec_type", out var kind) && kind.GetString() == "audio");
 
         double probedDuration;
         if (video.TryGetProperty("duration", out var videoDuration) && videoDuration.ValueKind == JsonValueKind.String)
@@ -48,6 +50,6 @@ static class MediaProbe
         var rounded = Math.Round(probedDuration * probedFps, MidpointRounding.AwayFromZero);
         if (rounded < 1 || rounded > 1_000_000_000)
             throw new InvalidOperationException("The video duration or frame rate could not be read.");
-        return new MediaInfo(probedDuration, probedFps, (long)rounded);
+        return new MediaInfo(probedDuration, probedFps, (long)rounded, hasAudio);
     }
 }

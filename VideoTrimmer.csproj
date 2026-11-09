@@ -8,9 +8,18 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>VideoTrimmer</AssemblyName>
     <RootNamespace>VideoTrimmer</RootNamespace>
+    <!-- The only place the version is set: YYYY.MM.DD.## (release date, then the build number for that day). -->
+    <Version>2026.11.09.02</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <Product>VideoTrimmer</Product>
+    <ApplicationIcon>assets\VideoTrimmer.ico</ApplicationIcon>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
   <ItemGroup>
     <None Update="tools\ffmpeg.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
     <None Update="tools\ffprobe.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="NAudio.WinMM" Version="2.2.1" />
   </ItemGroup>
 </Project>

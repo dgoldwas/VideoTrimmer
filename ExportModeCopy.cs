@@ -13,14 +13,20 @@ static class ExportModeCopy
 
     public const string CopyAudioTitle = "Copy audio";
 
-    public static string Explanation(bool exact, ExactExportOptions options = default)
+    public const string FastMultiExplanation =
+        "Copies each segment, then joins them without re-encoding. Every segment can start slightly earlier, on a keyframe.";
+
+    public const string ExactMultiAudio =
+        "Several segments keep the first video and audio track, and audio is re-encoded to AAC.";
+
+    public static string Explanation(bool exact, ExactExportOptions options = default, int segments = 1)
     {
-        if (!exact) return FastExplanation;
+        if (!exact) return segments > 1 ? FastMultiExplanation : FastExplanation;
         if (options.Equals(default)) options = ExactExportOptions.Default;
         return ExactBaseExplanation
             + " "
             + ExactExportPresets.Hint(options.Quality)
             + " "
-            + ExactExportPresets.AudioHint(options.CopyAudio);
+            + (segments > 1 ? ExactMultiAudio : ExactExportPresets.AudioHint(options.CopyAudio));
     }
 }

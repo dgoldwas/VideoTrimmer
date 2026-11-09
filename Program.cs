@@ -10,6 +10,10 @@ internal static class Program
             var errors = TimeMath.SelfCheck()
                 .Concat(FrameCache.SelfCheck())
                 .Concat(ExportService.SelfCheck())
+                .Concat(CutList.SelfCheck())
+                .Concat(AudioWaveform.SelfCheck())
+                .Concat(EditPlayer.SelfCheck())
+                .Concat(UpdateService.SelfCheck())
                 .ToList();
             var path = Path.Combine(Path.GetTempPath(), "vt-check.txt");
             File.WriteAllLines(path, errors.Count == 0 ? ["ok"] : errors);

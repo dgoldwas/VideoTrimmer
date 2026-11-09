@@ -442,6 +442,8 @@ sealed class StatusBar : Panel
 {
     public Label Label { get; }
     public ThinProgress Progress { get; }
+    /// <summary>Shows the running version; becomes "Update to ..." when GitHub has a newer release.</summary>
+    public FlatButton UpdateButton { get; }
 
     public StatusBar()
     {
@@ -454,29 +456,257 @@ sealed class StatusBar : Panel
             AccessibleName = "Status",
         };
         Progress = new ThinProgress { AccessibleName = "Export progress" };
+        UpdateButton = new FlatButton { Font = Theme.Ui(8.5f), TextColor = Theme.Muted, AccessibleName = "Check for updates", TabStop = false };
         Controls.Add(Label);
         Controls.Add(Progress);
+        Controls.Add(UpdateButton);
     }
 
     protected override void OnLayout(LayoutEventArgs levent)
     {
         base.OnLayout(levent);
         var pad = LogicalToDeviceUnits(12);
+        var right = ClientSize.Width - LogicalToDeviceUnits(4);
+        if (UpdateButton.Visible)
+        {
+            var updateWidth = TextRenderer.MeasureText(UpdateButton.Text, UpdateButton.Font).Width + LogicalToDeviceUnits(20);
+            var updateHeight = Math.Max(1, ClientSize.Height - LogicalToDeviceUnits(6));
+            UpdateButton.SetBounds(right - updateWidth, (ClientSize.Height - updateHeight) / 2, updateWidth, updateHeight);
+            right = UpdateButton.Left - LogicalToDeviceUnits(8);
+        }
+
         if (Progress.Visible)
         {
             var progressWidth = LogicalToDeviceUnits(160);
             var progressHeight = LogicalToDeviceUnits(8);
-            Progress.SetBounds(ClientSize.Width - pad - progressWidth, Math.Max(0, (ClientSize.Height - progressHeight) / 2), progressWidth, progressHeight);
-            Label.SetBounds(pad, 0, Math.Max(10, Progress.Left - pad * 2), ClientSize.Height);
+            Progress.SetBounds(right - progressWidth, Math.Max(0, (ClientSize.Height - progressHeight) / 2), progressWidth, progressHeight);
+            right = Progress.Left - pad;
         }
-        else
-        {
-            Label.SetBounds(pad, 0, Math.Max(10, ClientSize.Width - pad * 2), ClientSize.Height);
-        }
+
+        Label.SetBounds(pad, 0, Math.Max(10, right - pad), ClientSize.Height);
     }
 }
 
-sealed class PointsPanel : Panel
+/// <summary>A rounded sidebar panel with a small uppercase title, like FrameGrabber's sections.</summary>
+sealed class Card : Panel
+{
+    string title = "";
+    string detail = "";
+
+    public Card()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        BackColor = Theme.Background;
+    }
+
+    public string Title
+    {
+        get => title;
+        set { title = value; AccessibleName = value; Invalidate(); }
+    }
+
+    /// <summary>Muted text on the right of the title, such as a count.</summary>
+    public string Detail
+    {
+        get => detail;
+        set { if (detail == value) return; detail = value; Invalidate(); }
+    }
+
+    public int Pad => LogicalToDeviceUnits(14);
+    public int ContentTop => Pad + LogicalToDeviceUnits(22);
+    public Rectangle ContentBounds => new(Pad, ContentTop, Math.Max(1, ClientSize.Width - Pad * 2), Math.Max(1, ClientSize.Height - ContentTop - Pad));
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Theme.Background);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var path = PaintUtil.Rounded(new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1), LogicalToDeviceUnits(14));
+        using var brush = new SolidBrush(Theme.Surface);
+        g.FillPath(brush, path);
+        var header = new Rectangle(Pad, Pad - LogicalToDeviceUnits(2), ClientSize.Width - Pad * 2, LogicalToDeviceUnits(18));
+        TextRenderer.DrawText(g, title.ToUpperInvariant(), Theme.Ui(8, FontStyle.Bold), header, Theme.Muted,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        if (detail.Length > 0)
+            TextRenderer.DrawText(g, detail, Theme.Ui(8.5f), header, Theme.Muted,
+                TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+}
+
+/// <summary>
+/// Every kept segment as a row: number, in → out, length, and where it lands in the export.
+/// Click a row to edit that segment; its × removes it. Scrolls with the mouse wheel.
+/// </summary>
+sealed class SegmentList : Control
+{
+    IReadOnlyList<Segment> segments = [];
+    int active;
+    double fps = 30;
+    int scroll;
+    int hover = -1;
+    bool hoverClose;
+
+    public event EventHandler<int>? SelectRequested;
+    public event EventHandler<int>? RemoveRequested;
+
+    public SegmentList()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        BackColor = Theme.Surface;
+        AccessibleName = "Segments";
+        AccessibleRole = AccessibleRole.List;
+    }
+
+    int RowHeight => LogicalToDeviceUnits(46);
+    int Gap => LogicalToDeviceUnits(6);
+    int Stride => RowHeight + Gap;
+    int MaxScroll => Math.Max(0, segments.Count * Stride - Gap - ClientSize.Height);
+
+    public void SetSegments(IReadOnlyList<Segment> all, int activeIndex, double framesPerSecond)
+    {
+        var activeMoved = activeIndex != active || all.Count != segments.Count;
+        segments = all;
+        active = activeIndex;
+        fps = framesPerSecond;
+        if (activeMoved) ScrollIntoView(active);
+        scroll = Math.Clamp(scroll, 0, MaxScroll);
+        AccessibleDescription = $"{all.Count} segments. Segment {active + 1} is selected.";
+        Invalidate();
+    }
+
+    void ScrollIntoView(int index)
+    {
+        var top = index * Stride;
+        if (top < scroll) scroll = top;
+        else if (top + RowHeight > scroll + ClientSize.Height) scroll = top + RowHeight - ClientSize.Height;
+    }
+
+    Rectangle RowRect(int index) => new(0, index * Stride - scroll, ClientSize.Width - LogicalToDeviceUnits(6), RowHeight);
+
+    Rectangle CloseRect(Rectangle row) => new(row.Right - LogicalToDeviceUnits(32), row.Top, LogicalToDeviceUnits(28), row.Height);
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Theme.Surface);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var normalized = CutList.Normalize(segments, long.MaxValue);
+        for (var i = 0; i < segments.Count; i++)
+        {
+            var row = RowRect(i);
+            if (row.Bottom < 0 || row.Top > ClientSize.Height) continue;
+            DrawRow(g, i, row, normalized);
+        }
+
+        if (MaxScroll > 0)
+        {
+            // A thin scroll thumb on the right edge.
+            var track = ClientSize.Height;
+            var thumb = Math.Max(LogicalToDeviceUnits(24), track * track / (MaxScroll + track));
+            var top = (int)((track - thumb) * (scroll / (double)MaxScroll));
+            using var brush = new SolidBrush(Theme.Border);
+            g.FillRectangle(brush, ClientSize.Width - LogicalToDeviceUnits(3), top, LogicalToDeviceUnits(3), thumb);
+        }
+    }
+
+    void DrawRow(Graphics g, int index, Rectangle row, IReadOnlyList<Segment> normalized)
+    {
+        var segment = segments[index];
+        var selected = index == active;
+        var hovered = index == hover;
+        var fill = selected ? Theme.Mix(Theme.Surface, Theme.Accent, 0.28f) : hovered ? Theme.Lift(Theme.Background, 10) : Theme.Background;
+        using (var path = PaintUtil.Rounded(new Rectangle(row.X, row.Y, row.Width - 1, row.Height - 1), LogicalToDeviceUnits(10)))
+        using (var brush = new SolidBrush(fill))
+        using (var pen = new Pen(selected ? Theme.Accent : Theme.Border, selected ? 2 : 1))
+        {
+            g.FillPath(brush, path);
+            g.DrawPath(pen, path);
+        }
+
+        var badgeSize = LogicalToDeviceUnits(24);
+        var badge = new Rectangle(row.Left + LogicalToDeviceUnits(10), row.Top + (row.Height - badgeSize) / 2, badgeSize, badgeSize);
+        using (var badgeBrush = new SolidBrush(selected ? Theme.Accent : Theme.Surface))
+            g.FillEllipse(badgeBrush, badge);
+        TextRenderer.DrawText(g, (index + 1).ToString(), Theme.Ui(8.5f, FontStyle.Bold), badge, selected ? Color.White : Theme.Text,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+
+        var textLeft = badge.Right + LogicalToDeviceUnits(10);
+        var close = segments.Count > 1 ? CloseRect(row) : Rectangle.Empty;
+        var textRight = (close.IsEmpty ? row.Right : close.Left) - LogicalToDeviceUnits(4);
+        var half = row.Height / 2;
+        var times = new Rectangle(textLeft, row.Top + LogicalToDeviceUnits(4), textRight - textLeft, half - LogicalToDeviceUnits(2));
+        TextRenderer.DrawText(g, $"{TimeMath.Format(segment.In, fps)} → {TimeMath.Format(segment.Out, fps)}", Theme.Mono(9.5f), times, Theme.Text,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var at = CutList.EditedFrame(normalized, segment.In);
+        var info = new Rectangle(textLeft, row.Top + half, textRight - textLeft, half - LogicalToDeviceUnits(4));
+        TextRenderer.DrawText(g, $"{TimeMath.Format(segment.Length, fps)} long  ·  at {TimeMath.Format(at, fps)} in export", Theme.Ui(8.5f), info, Theme.Muted,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+
+        if (!close.IsEmpty && (hovered || selected))
+        {
+            var color = hovered && hoverClose ? Theme.OutPoint : Theme.Muted;
+            TextRenderer.DrawText(g, "×", Theme.Ui(13, FontStyle.Bold), close, color, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+    }
+
+    (int Index, bool Close) HitAt(Point point)
+    {
+        for (var i = 0; i < segments.Count; i++)
+        {
+            var row = RowRect(i);
+            if (!row.Contains(point)) continue;
+            return (i, segments.Count > 1 && CloseRect(row).Contains(point));
+        }
+
+        return (-1, false);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        var (index, close) = HitAt(e.Location);
+        Cursor = index >= 0 ? Cursors.Hand : Cursors.Default;
+        if (index == hover && close == hoverClose) return;
+        hover = index;
+        hoverClose = close;
+        Invalidate();
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        hover = -1;
+        Invalidate();
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        if (e.Button != MouseButtons.Left) return;
+        var (index, close) = HitAt(e.Location);
+        if (index < 0) return;
+        if (close) RemoveRequested?.Invoke(this, index);
+        else SelectRequested?.Invoke(this, index);
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        var next = Math.Clamp(scroll - Math.Sign(e.Delta) * Stride, 0, MaxScroll);
+        if (next == scroll) return;
+        scroll = next;
+        Invalidate();
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        scroll = Math.Clamp(scroll, 0, MaxScroll);
+    }
+}
+
+/// <summary>In and out of the selected segment: set at the playhead, type a timecode or frame, or nudge a frame.</summary>
+sealed class SegmentEditor : Panel
 {
     public FlatButton SetIn { get; }
     public FlatButton SetOut { get; }
@@ -490,9 +720,9 @@ sealed class PointsPanel : Panel
     public FlatButton OutLater { get; }
     public Label Selected { get; }
 
-    public PointsPanel()
+    public SegmentEditor()
     {
-        BackColor = Theme.Background;
+        BackColor = Theme.Surface;
         SetIn = Edge("In", "Set in point", Theme.InPoint);
         SetOut = Edge("Out", "Set out point", Theme.OutPoint);
         InTime = Field("In timecode");
@@ -507,37 +737,36 @@ sealed class PointsPanel : Panel
         {
             AutoEllipsis = true,
             ForeColor = Theme.Text,
-            Font = Theme.Ui(10, FontStyle.Bold),
+            BackColor = Theme.Surface,
+            Font = Theme.Ui(9.5f, FontStyle.Bold),
             TextAlign = ContentAlignment.MiddleLeft,
         };
         Controls.AddRange([SetIn, InTime, InFrame, InEarlier, InLater, SetOut, OutTime, OutFrame, OutEarlier, OutLater, Selected]);
     }
 
+    public int MeasureHeight() => LogicalToDeviceUnits(34) * 2 + LogicalToDeviceUnits(8) * 2 + LogicalToDeviceUnits(22);
+
     protected override void OnLayout(LayoutEventArgs levent)
     {
         base.OnLayout(levent);
         var gap = LogicalToDeviceUnits(8);
-        var rowHeight = Math.Max(LogicalToDeviceUnits(34), (ClientSize.Height - gap) / 2);
-        LayoutEdge(0, rowHeight, SetIn, InTime, InFrame, InEarlier, InLater, null);
-        LayoutEdge(rowHeight + gap, rowHeight, SetOut, OutTime, OutFrame, OutEarlier, OutLater, Selected);
+        var rowHeight = LogicalToDeviceUnits(34);
+        LayoutEdge(0, rowHeight, SetIn, InTime, InFrame, InEarlier, InLater);
+        LayoutEdge(rowHeight + gap, rowHeight, SetOut, OutTime, OutFrame, OutEarlier, OutLater);
+        Selected.SetBounds(0, (rowHeight + gap) * 2, ClientSize.Width, LogicalToDeviceUnits(22));
     }
 
-    void LayoutEdge(int y, int height, FlatButton edge, DarkField time, DarkField frame, FlatButton earlier, FlatButton later, Label? selected)
+    void LayoutEdge(int y, int height, FlatButton edge, DarkField time, DarkField frame, FlatButton earlier, FlatButton later)
     {
-        var gap = LogicalToDeviceUnits(8);
-        var x = 0;
-        edge.SetBounds(x, y, LogicalToDeviceUnits(56), height);
-        x = edge.Right + gap;
-        time.SetBounds(x, y, LogicalToDeviceUnits(118), height);
-        x = time.Right + gap;
-        frame.SetBounds(x, y, LogicalToDeviceUnits(88), height);
-        x = frame.Right + gap;
-        earlier.SetBounds(x, y, LogicalToDeviceUnits(34), height);
-        x = earlier.Right + gap;
-        later.SetBounds(x, y, LogicalToDeviceUnits(34), height);
-        if (selected is null) return;
-        x = later.Right + gap;
-        selected.SetBounds(x, y, Math.Max(0, ClientSize.Width - x), height);
+        var gap = LogicalToDeviceUnits(6);
+        var nudge = LogicalToDeviceUnits(30);
+        var edgeWidth = LogicalToDeviceUnits(48);
+        var frameWidth = LogicalToDeviceUnits(74);
+        later.SetBounds(ClientSize.Width - nudge, y, nudge, height);
+        earlier.SetBounds(later.Left - gap - nudge, y, nudge, height);
+        edge.SetBounds(0, y, edgeWidth, height);
+        frame.SetBounds(earlier.Left - gap - frameWidth, y, frameWidth, height);
+        time.SetBounds(edge.Right + gap, y, Math.Max(40, frame.Left - gap - edge.Right - gap), height);
     }
 
     static FlatButton Edge(string text, string name, Color color) => new()
@@ -545,6 +774,7 @@ sealed class PointsPanel : Panel
         Text = text,
         AccessibleName = name,
         TextColor = color,
+        BackColor = Theme.Surface,
     };
 
     static DarkField Field(string name)
@@ -559,9 +789,11 @@ sealed class PointsPanel : Panel
         Text = text,
         AccessibleName = name,
         Font = Theme.Ui(12, FontStyle.Bold),
+        BackColor = Theme.Surface,
     };
 }
 
+/// <summary>Fast copy or exact frames, the exact-mode presets, an explanation, and the Export button, stacked for the sidebar.</summary>
 sealed class ExportBar : Panel
 {
     public OptionCard Fast { get; }
@@ -574,38 +806,31 @@ sealed class ExportBar : Panel
     public FlatButton Cancel { get; }
     public Label Explanation { get; }
 
-    bool narrow;
     bool exactMode;
     ExactQuality quality = ExactExportOptions.Default.Quality;
     bool copyAudio;
+    int segments = 1;
+    bool optionsEnabled = true;
 
     public ExportBar()
     {
-        BackColor = Theme.Background;
-        Fast = new OptionCard { Title = ExportModeCopy.FastTitle, AccessibleDescription = ExportModeCopy.FastExplanation };
-        Exact = new OptionCard { Title = ExportModeCopy.ExactTitle, AccessibleDescription = ExportModeCopy.ExactBaseExplanation };
-        QualityHigh = new OptionCard { Title = ExactExportPresets.Title(ExactQuality.High), AccessibleDescription = ExactExportPresets.Hint(ExactQuality.High), Visible = false };
-        QualityBalanced = new OptionCard { Title = ExactExportPresets.Title(ExactQuality.Balanced), AccessibleDescription = ExactExportPresets.Hint(ExactQuality.Balanced), Visible = false };
-        QualitySmall = new OptionCard { Title = ExactExportPresets.Title(ExactQuality.Small), AccessibleDescription = ExactExportPresets.Hint(ExactQuality.Small), Visible = false };
-        CopyAudio = new OptionCard { Title = ExportModeCopy.CopyAudioTitle, AccessibleDescription = ExactExportPresets.AudioHint(true), Visible = false };
-        Export = new FlatButton { Text = "Export…", Primary = true, AccessibleName = "Export", Enabled = false };
-        Cancel = new FlatButton { Text = "Cancel", AccessibleName = "Cancel export", Enabled = false, Visible = false, TextColor = Theme.OutPoint };
+        BackColor = Theme.Surface;
+        Fast = Option(ExportModeCopy.FastTitle, ExportModeCopy.FastExplanation, visible: true);
+        Exact = Option(ExportModeCopy.ExactTitle, ExportModeCopy.ExactBaseExplanation, visible: true);
+        QualityHigh = Option(ExactExportPresets.Title(ExactQuality.High), ExactExportPresets.Hint(ExactQuality.High), visible: false);
+        QualityBalanced = Option(ExactExportPresets.Title(ExactQuality.Balanced), ExactExportPresets.Hint(ExactQuality.Balanced), visible: false);
+        QualitySmall = Option(ExactExportPresets.Title(ExactQuality.Small), ExactExportPresets.Hint(ExactQuality.Small), visible: false);
+        CopyAudio = Option(ExportModeCopy.CopyAudioTitle, ExactExportPresets.AudioHint(true), visible: false);
+        Export = new FlatButton { Text = "Export…", Primary = true, AccessibleName = "Export", Enabled = false, BackColor = Theme.Surface };
+        Cancel = new FlatButton { Text = "Cancel", AccessibleName = "Cancel export", Enabled = false, Visible = false, TextColor = Theme.OutPoint, BackColor = Theme.Surface };
         Explanation = new Label
         {
-            AutoEllipsis = true,
             ForeColor = Theme.Muted,
+            BackColor = Theme.Surface,
             Font = Theme.Ui(9),
-            TextAlign = ContentAlignment.MiddleLeft,
+            TextAlign = ContentAlignment.TopLeft,
         };
-        Controls.Add(Fast);
-        Controls.Add(Exact);
-        Controls.Add(QualityHigh);
-        Controls.Add(QualityBalanced);
-        Controls.Add(QualitySmall);
-        Controls.Add(CopyAudio);
-        Controls.Add(Export);
-        Controls.Add(Cancel);
-        Controls.Add(Explanation);
+        Controls.AddRange([Fast, Exact, QualityHigh, QualityBalanced, QualitySmall, CopyAudio, Export, Cancel, Explanation]);
 
         QualityHigh.Click += (_, _) => SetQuality(ExactQuality.High);
         QualityBalanced.Click += (_, _) => SetQuality(ExactQuality.Balanced);
@@ -614,6 +839,14 @@ sealed class ExportBar : Panel
 
         SetMode(false);
     }
+
+    static OptionCard Option(string title, string description, bool visible) => new()
+    {
+        Title = title,
+        AccessibleDescription = description,
+        Visible = visible,
+        BackColor = Theme.Surface,
+    };
 
     public ExactExportOptions ExactOptions => new(quality, copyAudio);
 
@@ -635,32 +868,35 @@ sealed class ExportBar : Panel
 
     public void SetExactOptionsEnabled(bool enabled)
     {
+        optionsEnabled = enabled;
         QualityHigh.Enabled = enabled;
         QualityBalanced.Enabled = enabled;
         QualitySmall.Enabled = enabled;
-        CopyAudio.Enabled = enabled;
+        // A multi-segment re-encode joins audio in a filter graph, so it cannot be copied.
+        CopyAudio.Enabled = enabled && segments == 1;
     }
 
-    public int MeasureHeight(bool narrowLayout)
+    public void SetSegmentCount(int count)
+    {
+        if (segments == count) return;
+        segments = count;
+        SetExactOptionsEnabled(optionsEnabled);
+        RefreshExplanation();
+    }
+
+    public int MeasureHeight(int width)
     {
         var gap = LogicalToDeviceUnits(8);
-        var explanation = LogicalToDeviceUnits(32);
-        if (!narrowLayout)
-        {
-            var height = LogicalToDeviceUnits(40) + LogicalToDeviceUnits(4) + explanation;
-            if (exactMode) height += gap + LogicalToDeviceUnits(32);
-            return height;
-        }
-
-        var heightNarrow = LogicalToDeviceUnits(36) + gap + LogicalToDeviceUnits(36) + gap + LogicalToDeviceUnits(36) + LogicalToDeviceUnits(4) + explanation;
-        if (exactMode) heightNarrow += gap + LogicalToDeviceUnits(32);
-        return heightNarrow;
+        var height = LogicalToDeviceUnits(36) + gap;
+        if (exactMode) height += (LogicalToDeviceUnits(32) + gap) * 2;
+        height += ExplanationHeight(width) + gap + LogicalToDeviceUnits(38);
+        return height;
     }
 
-    public void Arrange(bool narrowLayout)
+    int ExplanationHeight(int width)
     {
-        narrow = narrowLayout;
-        PerformLayout();
+        var size = TextRenderer.MeasureText(Explanation.Text, Explanation.Font, new Size(Math.Max(40, width), int.MaxValue), TextFormatFlags.WordBreak);
+        return size.Height + LogicalToDeviceUnits(2);
     }
 
     void SetQuality(ExactQuality value)
@@ -674,7 +910,7 @@ sealed class ExportBar : Panel
 
     void SetCopyAudio(bool value)
     {
-        if (!exactMode || copyAudio == value) return;
+        if (!exactMode || copyAudio == value || segments > 1) return;
         copyAudio = value;
         SyncExactSelection();
         RefreshExplanation();
@@ -692,68 +928,118 @@ sealed class ExportBar : Panel
 
     void RefreshExplanation()
     {
-        Explanation.Text = ExportModeCopy.Explanation(exactMode, ExactOptions);
+        Explanation.Text = ExportModeCopy.Explanation(exactMode, ExactOptions, segments);
         Explanation.AccessibleName = Explanation.Text;
+        ExactOptionsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     protected override void OnLayout(LayoutEventArgs levent)
     {
         base.OnLayout(levent);
         var gap = LogicalToDeviceUnits(8);
-        var buttonWidth = LogicalToDeviceUnits(132);
-        var cancelWidth = LogicalToDeviceUnits(96);
-        var buttonHeight = LogicalToDeviceUnits(36);
-        var optionsHeight = LogicalToDeviceUnits(32);
-        if (!narrow)
-        {
-            var rowHeight = LogicalToDeviceUnits(40);
-            var right = ClientSize.Width;
-            Export.SetBounds(Math.Max(0, right - buttonWidth), 0, buttonWidth, buttonHeight);
-            right = Export.Left - gap;
-            if (Cancel.Visible)
-            {
-                Cancel.SetBounds(Math.Max(0, right - cancelWidth), 0, cancelWidth, buttonHeight);
-                right = Cancel.Left - gap;
-            }
-
-            var cardWidth = Math.Max(40, (right - gap) / 2);
-            Fast.SetBounds(0, 0, cardWidth, rowHeight);
-            Exact.SetBounds(cardWidth + gap, 0, Math.Max(40, right - cardWidth - gap), rowHeight);
-            var y = rowHeight + LogicalToDeviceUnits(4);
-            if (exactMode)
-            {
-                LayoutExactOptions(0, y, ClientSize.Width, optionsHeight, gap);
-                y += optionsHeight + gap;
-            }
-
-            Explanation.SetBounds(0, y, ClientSize.Width, Math.Max(0, ClientSize.Height - y));
-            return;
-        }
-
-        var cardHeight = LogicalToDeviceUnits(36);
-        Fast.SetBounds(0, 0, ClientSize.Width, cardHeight);
-        Exact.SetBounds(0, cardHeight + gap, ClientSize.Width, cardHeight);
-        var row = Exact.Bottom + gap;
-        Export.SetBounds(Math.Max(0, ClientSize.Width - buttonWidth), row, buttonWidth, buttonHeight);
-        Cancel.SetBounds(Math.Max(0, Export.Left - gap - cancelWidth), row, cancelWidth, buttonHeight);
-        row = Export.Bottom + LogicalToDeviceUnits(4);
+        var width = ClientSize.Width;
+        var half = (width - gap) / 2;
+        var y = 0;
+        Fast.SetBounds(0, y, half, LogicalToDeviceUnits(36));
+        Exact.SetBounds(half + gap, y, width - half - gap, LogicalToDeviceUnits(36));
+        y += LogicalToDeviceUnits(36) + gap;
         if (exactMode)
         {
-            LayoutExactOptions(0, row, ClientSize.Width, optionsHeight, gap);
-            row += optionsHeight + gap;
+            var row = LogicalToDeviceUnits(32);
+            var cell = (width - gap * 2) / 3;
+            QualityHigh.SetBounds(0, y, cell, row);
+            QualityBalanced.SetBounds(cell + gap, y, cell, row);
+            QualitySmall.SetBounds((cell + gap) * 2, y, width - (cell + gap) * 2, row);
+            y += row + gap;
+            CopyAudio.SetBounds(0, y, width, row);
+            y += row + gap;
         }
 
-        Explanation.SetBounds(0, row, ClientSize.Width, Math.Max(0, ClientSize.Height - row));
+        var explanation = ExplanationHeight(width);
+        Explanation.SetBounds(0, y, width, explanation);
+        y += explanation + gap;
+        var buttonHeight = LogicalToDeviceUnits(38);
+        if (Cancel.Visible)
+        {
+            var cancelWidth = LogicalToDeviceUnits(96);
+            Cancel.SetBounds(width - cancelWidth, y, cancelWidth, buttonHeight);
+            Export.SetBounds(0, y, Math.Max(40, Cancel.Left - gap), buttonHeight);
+        }
+        else
+        {
+            Export.SetBounds(0, y, width, buttonHeight);
+        }
+    }
+}
+
+/// <summary>Under the preview: jump to the previous cut, play the edit, jump to the next cut, the time readout, and zoom.</summary>
+sealed class TransportBar : Panel
+{
+    public FlatButton Previous { get; }
+    public FlatButton Play { get; }
+    public FlatButton Next { get; }
+    public Label Readout { get; }
+    public FlatButton ZoomOut { get; }
+    public FlatButton ZoomIn { get; }
+    public FlatButton Fit { get; }
+    public Label ZoomLabel { get; }
+
+    public TransportBar()
+    {
+        BackColor = Theme.Background;
+        Previous = Glyph("⏮", "Previous cut");
+        Play = new FlatButton { Text = "▶", Primary = true, Font = Theme.Symbol(12), AccessibleName = "Play the edit", TabStop = false };
+        Next = Glyph("⏭", "Next cut");
+        Readout = new Label
+        {
+            AutoEllipsis = true,
+            ForeColor = Theme.Text,
+            Font = Theme.Mono(10),
+            TextAlign = ContentAlignment.MiddleLeft,
+            AccessibleName = "Position",
+        };
+        ZoomOut = Glyph("−", "Zoom out");
+        ZoomIn = Glyph("+", "Zoom in");
+        Fit = new FlatButton { Text = "Fit", AccessibleName = "Show the whole video", TabStop = false };
+        ZoomLabel = new Label
+        {
+            ForeColor = Theme.Muted,
+            Font = Theme.Ui(9),
+            TextAlign = ContentAlignment.MiddleCenter,
+            AccessibleName = "Zoom",
+        };
+        Controls.AddRange([Previous, Play, Next, Readout, ZoomOut, ZoomLabel, ZoomIn, Fit]);
     }
 
-    void LayoutExactOptions(int x, int y, int width, int height, int gap)
+    static FlatButton Glyph(string text, string name) => new()
     {
-        var audioWidth = LogicalToDeviceUnits(120);
-        var qualityWidth = Math.Max(40, width - audioWidth - gap);
-        var cell = Math.Max(40, (qualityWidth - gap * 2) / 3);
-        QualityHigh.SetBounds(x, y, cell, height);
-        QualityBalanced.SetBounds(QualityHigh.Right + gap, y, cell, height);
-        QualitySmall.SetBounds(QualityBalanced.Right + gap, y, Math.Max(40, qualityWidth - cell * 2 - gap * 2), height);
-        CopyAudio.SetBounds(x + qualityWidth + gap, y, Math.Max(40, width - qualityWidth - gap), height);
+        Text = text,
+        Font = Theme.Symbol(11),
+        AccessibleName = name,
+        TabStop = false,
+    };
+
+    public void SetPlaying(bool playing)
+    {
+        Play.Text = playing ? "⏸" : "▶";
+        Play.AccessibleName = playing ? "Pause" : "Play the edit";
+        Play.Invalidate();
+    }
+
+    protected override void OnLayout(LayoutEventArgs levent)
+    {
+        base.OnLayout(levent);
+        var gap = LogicalToDeviceUnits(6);
+        var height = ClientSize.Height;
+        var button = LogicalToDeviceUnits(40);
+        Previous.SetBounds(0, 0, button, height);
+        Play.SetBounds(Previous.Right + gap, 0, LogicalToDeviceUnits(52), height);
+        Next.SetBounds(Play.Right + gap, 0, button, height);
+        var right = ClientSize.Width;
+        Fit.SetBounds(right - LogicalToDeviceUnits(52), 0, LogicalToDeviceUnits(52), height);
+        ZoomIn.SetBounds(Fit.Left - gap - LogicalToDeviceUnits(34), 0, LogicalToDeviceUnits(34), height);
+        ZoomLabel.SetBounds(ZoomIn.Left - LogicalToDeviceUnits(56), 0, LogicalToDeviceUnits(56), height);
+        ZoomOut.SetBounds(ZoomLabel.Left - LogicalToDeviceUnits(34), 0, LogicalToDeviceUnits(34), height);
+        Readout.SetBounds(Next.Right + LogicalToDeviceUnits(14), 0, Math.Max(10, ZoomOut.Left - Next.Right - LogicalToDeviceUnits(24)), height);
     }
 }

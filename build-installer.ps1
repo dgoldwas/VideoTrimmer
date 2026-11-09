@@ -7,6 +7,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 if (!(Test-Path -LiteralPath $Compiler)) { throw "Inno Setup compiler not found: $Compiler" }
+if ($Release -and (& git -C $PSScriptRoot status --porcelain)) { throw 'Commit your changes before releasing, so the release tag matches the build.' }
 # build.ps1 publishes the app, checks its version and prints the publish folder last.
 & (Join-Path $PSScriptRoot 'build.ps1') | ForEach-Object { Write-Host $_; $publishRoot = "$_" }
 if ($LASTEXITCODE -ne 0) { throw 'Publish failed' }
@@ -29,7 +30,9 @@ if ($Install) {
 if ($Release) {
   $tag = "v$version"
   $notes = "VideoTrimmer $version. Install with the Setup.exe below; installed copies offer this release from the version button in the status bar."
-  & gh release create $tag $setup --repo dgoldwas/VideoTrimmer --title "VideoTrimmer $version" --notes $notes
+  # Tag the commit that was built, not whatever the default branch points at.
+  $commit = (& git -C $PSScriptRoot rev-parse HEAD).Trim()
+  & gh release create $tag $setup --repo dgoldwas/VideoTrimmer --target $commit --title "VideoTrimmer $version" --notes $notes
   if ($LASTEXITCODE -ne 0) { throw "Creating GitHub release $tag failed." }
   Write-Output "Released $tag."
 }

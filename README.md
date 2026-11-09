@@ -5,10 +5,11 @@ A small Windows desktop app for cutting a video down to the parts you want to ke
 ## Features
 
 - Open a video by browsing, drag and drop, or Explorer's **Open with** menu.
-- Scrub a filmstrip. Drag the in and out handles, or type a timecode and a frame number together.
-- The preview fills the window and follows the playhead.
-- **Multi-cut:** keep several segments of one video and export them joined into one file. Split a segment at the playhead, start a new one, or delete one. Everything outside the kept segments is hatched out. The segment strip shows each segment and the total kept and cut time.
-- **Smart timeline:** an audio waveform runs under the filmstrip. Silences (violet) and scene changes (amber) are found automatically in the background. Handles and the playhead snap to them while you drag.
+- Scrub a filmstrip with an audio waveform beneath it. Drag the in and out handles, or type a timecode and a frame number together.
+- **Zoom** the timeline to work frame by frame in long videos. When zoomed, an overview bar shows the whole clip; drag it to pan.
+- **Multi-cut:** keep several segments of one video and export them joined into one file. Split a segment at the playhead, start a new one, or delete one. Everything outside the kept segments is hatched out.
+- **Segments sidebar:** every segment is listed with its in, out, length and where it lands in the export. Click one to edit it in the selected-segment panel below the list.
+- **Play the edit:** play/pause plays the kept segments back to back with sound, the way the export will join them. ⏮ and ⏭ skip between cuts.
 - Export a fast stream copy, or re-encode for exact frames. Fast copy can start slightly early, on a keyframe.
 - Exact mode offers High / Balanced / Small quality presets and an optional copy-audio setting.
 - Preserve mapped streams in fast-copy mode (`-map 0`), including audio and subtitles supported by the selected output container.
@@ -20,11 +21,12 @@ A small Windows desktop app for cutting a video down to the parts you want to ke
 - Shift-click sets the in point. Alt-click sets the out point so the current frame is included.
 - `I` and `O` do the same at the playhead. Left and Right step one frame. Shift plus an arrow steps one second. Home and End jump to the selection edges. `[` and `]` nudge the edge nearest the playhead.
 - The mouse wheel steps one frame while the pointer is over the preview or the filmstrip.
-- `S` splits the segment under the playhead. `N` starts a new segment at the playhead that runs to the next kept segment or the end. `Delete` removes the active segment.
-- Click a chip in the segment strip, or double-click a dashed segment on the filmstrip, to make it the one the handles edit. The chip's `×` removes it. Dragging a segment into another one merges them when you let go.
-- `,` and `.` jump the playhead to the previous and next scene change or silence edge. Hold Ctrl while dragging to place a handle without snapping, or turn **Snap to cuts** off in the toolbar.
+- `S` splits the segment under the playhead. `N` starts a new segment at the playhead that runs to the next kept segment or the end. `Delete` removes the selected segment. **Reset** keeps the whole video again.
+- Click a segment in the sidebar, or double-click a dashed segment on the filmstrip, to make it the one the handles edit. A segment's `×` removes it. Dragging a segment into another one merges them when you let go.
+- `Space` (or a click on the preview) plays and pauses the edit from the playhead. A playhead inside a cut starts at the next kept frame. `,` and `.` jump to the previous and next cut. While playing they skip between joins; while paused they also stop at each segment's out point.
+- `Ctrl`+wheel zooms the timeline around the pointer. `+`, `-` and `0` zoom in, zoom out and fit. A tilt wheel or sideways touchpad swipe pans. Dragging a handle past the edge of a zoomed view scrolls it.
 
-To remove an ad break, for example: jump to the silence before it and press `S`. Jump to the silence after it and press `S` again. Then click the middle chip and press `Delete`.
+To remove an ad break, for example: put the playhead where it starts and press `S`, then where it ends and press `S` again. Select the middle segment in the sidebar and press `Delete`. Then press `Space` a little before the cut to check the join.
 
 ## Install
 
@@ -32,7 +34,7 @@ Run `VideoTrimmer-<version>-Setup.exe` from the [latest release](https://github.
 
 The version button at the right of the status bar shows the running version. VideoTrimmer checks GitHub for a newer release shortly after it starts and every six hours. When one exists, the button changes to **Update to …**. Click it to download the installer, check it against GitHub's SHA-256, close VideoTrimmer, install through a Windows permission prompt, and reopen with the same video. Click the version at any time to check now.
 
-The repository is private, so the update check needs GitHub access. It uses `VIDEOTRIMMER_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN` when set, otherwise the GitHub CLI's sign-in (`gh auth login`).
+The check reads this public repository's releases anonymously. When `VIDEOTRIMMER_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` or a GitHub CLI sign-in is available it is used too, which raises GitHub's rate limit.
 
 ## Run from source
 
@@ -70,14 +72,14 @@ Fast copy avoids video re-encoding and is quick, but it can only start cleanly o
 
 With several segments, fast copy copies each segment beside the output (in a hidden `.<name>.parts` folder that is removed afterwards) and joins them with FFmpeg's concat demuxer, so every segment can start on an earlier keyframe. Exact frames trims each segment by frame number and joins them in one re-encode. That re-encode keeps only the first video and audio track, and it always encodes the audio to AAC.
 
-Scene changes come from FFmpeg's `scdet` filter run over a 160-pixel-wide decode. Silences are spans quieter than -40 dBFS for at least 0.4 seconds. Both passes only read the source file.
+The waveform is read once per video from the first audio track, decoded to 8 kHz mono. Playing the edit decodes each kept segment with FFmpeg at preview size (up to 960 pixels wide) and its audio as 48 kHz PCM, played through [NAudio](https://github.com/naudio/NAudio) (MIT). The next segment is decoded ahead so joins play without a gap. Preview playback is for checking cuts; the export is what to judge picture quality by.
 
 ## Repository contents
 
 - `MainForm.cs`, `Program.cs`, and `VideoTrimmer.csproj`: application entry, main window, and project definition.
 - `Theme.cs`, `UiControls.cs`, `TimelineControl.cs`, `ExportModeCopy.cs`, `ExactExportOptions.cs`: dark theme, custom controls, filmstrip timeline, and export-mode copy/presets.
 - `TimeMath.cs`, `FfmpegRunner.cs`, `MediaProbe.cs`, `StillCapture.cs`, `FilmstripService.cs`, `ExportService.cs`: frame math, FFmpeg helpers, probe, stills, filmstrip, and export plans.
-- `CutList.cs`, `SmartAnalysis.cs`: multi-cut segments, and the waveform/silence/scene-change analysis.
+- `CutList.cs`, `AudioWaveform.cs`, `EditPlayer.cs`: multi-cut segments, the waveform, and playback of the edit.
 - `UpdateService.cs`, `MainForm.Updates.cs`: GitHub release checks and the self-update flow.
 - `build.ps1`, `build-installer.ps1`, `installer\VideoTrimmer.iss`, `assets\`: release build, installer, and icon.
 - `tools/README.md`: notes about optional local FFmpeg executables.

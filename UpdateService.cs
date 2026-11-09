@@ -172,8 +172,8 @@ static class UpdateService
         """;
 
     /// <summary>
-    /// The repository is private, so GitHub needs a token to show its releases. Use VIDEOTRIMMER_GITHUB_TOKEN, GH_TOKEN or
-    /// GITHUB_TOKEN when set, otherwise the GitHub CLI's sign-in; with none, ask anonymously (enough for a public repository).
+    /// The repository is public, so anonymous requests work. A token (VIDEOTRIMMER_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN,
+    /// or the GitHub CLI's sign-in) is still sent when available, which raises GitHub's rate limit.
     /// </summary>
     static async Task AuthorizeAsync(HttpRequestMessage request, CancellationToken cancellation)
     {

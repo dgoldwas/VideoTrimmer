@@ -48,6 +48,10 @@ static class CutList
 
     public static long KeptFrames(IEnumerable<Segment> segments) => segments.Sum(s => s.Length);
 
+    /// <summary>Where <paramref name="frame"/> lands in the exported video: the kept frames before it.</summary>
+    public static long EditedFrame(IEnumerable<Segment> normalized, long frame) =>
+        normalized.Sum(s => Math.Clamp(frame - s.In, 0, s.Length));
+
     public static IReadOnlyList<string> SelfCheck()
     {
         var errors = new List<string>();
@@ -65,6 +69,7 @@ static class CutList
         Expect(gaps.Count == 2 && gaps[0] == new Segment(20, 50) && gaps[1] == new Segment(90, 100), "gaps between and after segments");
         Expect(Gaps([new(0, 100)], 100).Count == 0, "no gaps when everything is kept");
         Expect(KeptFrames(merged) == 60, "kept frames");
+        Expect(EditedFrame(merged, 15) == 15 && EditedFrame(merged, 30) == 20 && EditedFrame(merged, 60) == 30 && EditedFrame(merged, 99) == 60, "edited frame skips gaps");
         return errors;
     }
 }

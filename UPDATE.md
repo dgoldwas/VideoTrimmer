@@ -1,5 +1,14 @@
 # Updates
 
+## 2026-11-09 (2026.11.09.02)
+
+- Removed scene-change and silence detection, the markers, and snapping. The waveform stays.
+- Timeline zoom: Ctrl+wheel around the pointer, `+` / `-` / `0`, and the transport's zoom buttons. A zoomed timeline shows an overview bar for panning and fetches thumbnails for the visible range.
+- Play the edit: a transport under the preview plays the kept segments back to back with audio (NAudio). ⏮ / ⏭ and `,` / `.` skip between cuts. `Space` or a click on the preview toggles playback.
+- New layout modeled on FrameGrabber: a sidebar with a **Segments** list (in, out, length, position in the export), a **Selected segment** in/out editor, and the **Export** panel.
+- **Reset** returns to one segment covering the whole video. The window title and dialogs now say "VideoTrimmer".
+- The repository is public, so update checks no longer need a GitHub token.
+
 ## 2026-11-09 (2026.11.09.01)
 
 - **Multi-cut:** the timeline holds several kept segments. `S` splits at the playhead, `N` starts a new segment, and `Delete` removes the active one. A segment strip lists them as chips and shows the kept and cut totals. Cut regions are dimmed and hatched.

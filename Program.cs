@@ -11,7 +11,8 @@ internal static class Program
                 .Concat(FrameCache.SelfCheck())
                 .Concat(ExportService.SelfCheck())
                 .Concat(CutList.SelfCheck())
-                .Concat(SmartAnalysis.SelfCheck())
+                .Concat(AudioWaveform.SelfCheck())
+                .Concat(EditPlayer.SelfCheck())
                 .Concat(UpdateService.SelfCheck())
                 .ToList();
             var path = Path.Combine(Path.GetTempPath(), "vt-check.txt");

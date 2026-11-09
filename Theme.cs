@@ -12,8 +12,6 @@ static class Theme
     public static readonly Color Accent = Color.FromArgb(76, 141, 255);
     public static readonly Color InPoint = Color.FromArgb(61, 220, 151);
     public static readonly Color OutPoint = Color.FromArgb(255, 107, 107);
-    public static readonly Color Scene = Color.FromArgb(255, 196, 61);
-    public static readonly Color Silence = Color.FromArgb(167, 139, 250);
     public static readonly Color Wave = Color.FromArgb(120, 178, 255);
 
     static readonly Dictionary<string, Font> fonts = new();
@@ -21,6 +19,9 @@ static class Theme
     public static Font Ui(float size, FontStyle style = FontStyle.Regular) => Get("Segoe UI", size, style);
 
     public static Font Mono(float size) => Get("Consolas", size, FontStyle.Regular);
+
+    /// <summary>For transport glyphs such as ▶ ⏸ ⏮ ⏭, which Segoe UI itself lacks.</summary>
+    public static Font Symbol(float size) => Get("Segoe UI Symbol", size, FontStyle.Regular);
 
     public static Color Lift(Color color, int amount) => Color.FromArgb(color.A, Clamp(color.R + amount), Clamp(color.G + amount), Clamp(color.B + amount));
 

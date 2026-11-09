@@ -1,10 +1,16 @@
 namespace VideoTrimmer;
 
+/// <summary>The thumbnails for one visible window of the timeline.</summary>
+readonly record struct StripKey(int Count, long Start, long End);
+
 sealed class FilmstripService
 {
+    const int CacheLimit = 4;
+
     readonly FfmpegRunner runner;
     readonly StillCapture stills;
-    readonly Dictionary<int, Bitmap?[]> filmCache = new();
+    // Most recently used last. Zooming back out finds the whole-clip strip here instead of decoding it again.
+    readonly List<(StripKey Key, Bitmap?[] Slots)> filmCache = new();
     readonly HashSet<Bitmap?[]> releasedStrips = new();
 
     Bitmap?[]? displayedStrip;
@@ -16,39 +22,46 @@ sealed class FilmstripService
         this.stills = stills;
     }
 
-    public int CurrentCount { get; private set; }
-    public int BuildingCount { get; private set; }
-    public int Generation => generation;
+    public StripKey? Current { get; private set; }
+    public StripKey? Building { get; private set; }
 
     public void InvalidateJobs()
     {
         generation++;
-        BuildingCount = 0;
+        Building = null;
     }
 
-    public bool TryGetCached(int count, out Bitmap?[]? slots) => filmCache.TryGetValue(count, out slots);
-
-    public void Show(TimelineControl timeline, Bitmap?[]? slots)
+    /// <summary>Shows a cached strip for <paramref name="key"/> if there is one.</summary>
+    public bool TryShowCached(TimelineControl timeline, StripKey key)
     {
+        var index = filmCache.FindIndex(entry => entry.Key == key);
+        if (index < 0) return false;
+        var entry = filmCache[index];
+        filmCache.RemoveAt(index);
+        filmCache.Add(entry);
+        Show(timeline, entry.Slots, key);
+        Current = key;
+        return true;
+    }
+
+    void Show(TimelineControl timeline, Bitmap?[]? slots, StripKey key)
+    {
+        // A strip that was evicted while on screen is freed once something replaces it.
+        if (displayedStrip is not null && displayedStrip != slots && !filmCache.Any(entry => entry.Slots == displayedStrip))
+            Release(displayedStrip);
         displayedStrip = slots;
-        timeline.UseStrip(slots);
-    }
-
-    public void ShowCached(TimelineControl timeline, int count, Bitmap?[] slots)
-    {
-        Show(timeline, slots);
-        CurrentCount = count;
+        timeline.UseStrip(slots, key.Start, key.End);
     }
 
     public void Clear(TimelineControl timeline)
     {
-        timeline.UseStrip(null);
-        var doomed = new HashSet<Bitmap?[]>(filmCache.Values);
+        timeline.UseStrip(null, 0, 0);
+        var doomed = new HashSet<Bitmap?[]>(filmCache.Select(entry => entry.Slots));
         if (displayedStrip is not null) doomed.Add(displayedStrip);
         filmCache.Clear();
         displayedStrip = null;
-        CurrentCount = 0;
-        BuildingCount = 0;
+        Current = null;
+        Building = null;
         foreach (var slots in doomed)
             Release(slots);
         releasedStrips.Clear();
@@ -59,13 +72,13 @@ sealed class FilmstripService
         TimelineControl timeline,
         string input,
         double duration,
-        int count,
+        StripKey key,
         CancellationToken token,
         Action<int, int> onProgress,
         Action<bool, string> onCompleted,
         Func<bool> isExporting)
     {
-        if (count < 1 || runner.Ffmpeg is null)
+        if (key.Count < 1 || runner.Ffmpeg is null)
         {
             timeline.Placeholder = runner.Ffmpeg is null
                 ? "FFmpeg is not available, so there is no filmstrip."
@@ -75,8 +88,8 @@ sealed class FilmstripService
         }
 
         var buildGeneration = ++generation;
-        BuildingCount = count;
-        _ = BuildAsync(owner, timeline, input, duration, count, buildGeneration, token, onProgress, onCompleted, isExporting);
+        Building = key;
+        _ = BuildAsync(owner, timeline, input, duration, key, buildGeneration, token, onProgress, onCompleted, isExporting);
     }
 
     async Task BuildAsync(
@@ -84,7 +97,7 @@ sealed class FilmstripService
         TimelineControl timeline,
         string input,
         double duration,
-        int count,
+        StripKey key,
         int buildGeneration,
         CancellationToken token,
         Action<int, int> onProgress,
@@ -92,11 +105,13 @@ sealed class FilmstripService
         Func<bool> isExporting)
     {
         // Sparse fast seeks stay responsive on long videos. One fps filter would decode the whole file.
+        var count = key.Count;
         var slots = new Bitmap?[count];
         var height = timeline.ThumbHeight;
+        var fps = timeline.Fps;
         if (buildGeneration != generation || owner.IsDisposed) return;
-        Show(timeline, slots);
-        timeline.Placeholder = "";
+        // Keep the previous strip on screen (stretched to the new view) until the new thumbnails arrive.
+        var swapped = false;
         var gate = new SemaphoreSlim(4);
         var filled = 0;
         var tasks = new Task[count];
@@ -123,17 +138,11 @@ sealed class FilmstripService
             return;
         }
 
-        Keep(count, slots);
-        CurrentCount = count;
-        BuildingCount = 0;
-        var any = false;
-        foreach (var frame in slots)
-        {
-            if (frame is null) continue;
-            any = true;
-            break;
-        }
-
+        if (!swapped) Show(timeline, slots, key);
+        Keep(key, slots);
+        Current = key;
+        Building = null;
+        var any = slots.Any(frame => frame is not null);
         var failure = "No preview frames could be created. You can still set the range and export.";
         timeline.Placeholder = any ? "" : failure;
         timeline.Invalidate();
@@ -147,8 +156,9 @@ sealed class FilmstripService
             {
                 await gate.WaitAsync(token).ConfigureAwait(false);
                 acquired = true;
-                var time = count == 1 ? 0 : duration * index / (count - 1d);
-                if (time > duration - 0.05) time = Math.Max(0, duration - 0.05);
+                // The middle of the slot's share of the window.
+                var frame = key.Start + (key.End - key.Start) * (index + 0.5) / count;
+                var time = Math.Min(frame / fps, Math.Max(0, duration - 0.05));
                 var bitmap = await stills.CaptureAsync(input, duration, time, accurate: false, "scale=-2:" + height, 5, token).ConfigureAwait(false);
                 void Assign()
                 {
@@ -160,8 +170,15 @@ sealed class FilmstripService
 
                     slots[index] = bitmap;
                     filled++;
+                    // Swap to the new strip once a quarter of it is ready, so zooming does not flash empty slots.
+                    if (!swapped && filled * 4 >= count)
+                    {
+                        swapped = true;
+                        Show(timeline, slots, key);
+                    }
+
                     // Paint in batches so a 32-thumb strip does not redraw on every slot.
-                    if (filled == count || (filled & 3) == 0)
+                    if (swapped && (filled == count || (filled & 3) == 0))
                         timeline.Invalidate();
                     if (!isExporting())
                         onProgress(filled, count);
@@ -192,20 +209,27 @@ sealed class FilmstripService
         }
     }
 
-    void Keep(int count, Bitmap?[] slots)
+    void Keep(StripKey key, Bitmap?[] slots)
     {
-        foreach (var key in filmCache.Keys.ToArray())
+        var existing = filmCache.FindIndex(entry => entry.Key == key);
+        if (existing >= 0)
         {
-            if (key == count) continue;
-            var old = filmCache[key];
-            filmCache.Remove(key);
-            if (old != displayedStrip && old != slots)
-                Release(old);
+            var old = filmCache[existing].Slots;
+            filmCache.RemoveAt(existing);
+            if (old != slots && old != displayedStrip) Release(old);
         }
 
-        if (filmCache.TryGetValue(count, out var existing) && existing != slots && existing != displayedStrip)
-            Release(existing);
-        filmCache[count] = slots;
+        filmCache.Add((key, slots));
+        while (filmCache.Count > CacheLimit)
+        {
+            // Evict the oldest zoomed strip; the widest (whole-clip) strip is the one zooming out returns to.
+            var widest = filmCache.Max(entry => entry.Key.End - entry.Key.Start);
+            var victim = filmCache.FindIndex(entry => entry.Key != key && entry.Key.End - entry.Key.Start < widest);
+            if (victim < 0) victim = filmCache.FindIndex(entry => entry.Key != key);
+            var old = filmCache[victim].Slots;
+            filmCache.RemoveAt(victim);
+            if (old != displayedStrip) Release(old);
+        }
     }
 
     void Release(Bitmap?[]? slots)

@@ -82,12 +82,18 @@ public sealed partial class MainForm
         // What an export looks like partway, without writing a file.
         timeline.Locked = true;
         exportBar.SetBusy(true);
-        exportBar.Export.Progress = 0.42;
-        exportBar.Export.Text = "Exporting… 42%";
-        SetStatus("Encoding exact frames… 42%", StatusKind.Busy);
+
+        exportBar.Export.Text = "Exporting…";
+        SetStatus("Tone-mapping HDR to SDR · Stereo AAC…", StatusKind.Busy);
+        workStatus.Progress = 0.42;
         LayoutChrome();
         await Task.Delay(200);
         Save(this, folder, "6-exporting");
+        var originalSize = Size;
+        Size = MinimumSize;
+        await Task.Delay(200);
+        Save(this, folder, "6-exporting-small");
+        Size = originalSize;
         exportBar.SetBusy(false);
         timeline.Locked = false;
         UpdateReadouts();

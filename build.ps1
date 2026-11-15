@@ -12,7 +12,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Release publish failed' }
 $exe = Join-Path $publishRoot 'VideoTrimmer.exe'
 if ((Get-Item -LiteralPath $exe).VersionInfo.ProductVersion -ne $version) { throw "The published VideoTrimmer.exe does not report version $version." }
 # VideoTrimmer is a GUI app, so wait for its self-check explicitly.
-$check = Start-Process -FilePath $exe -ArgumentList '--check' -Wait -PassThru
+$check = Start-Process -FilePath $exe -ArgumentList '--check' -WindowStyle Hidden -Wait -PassThru
 $checkResult = Get-Content -LiteralPath (Join-Path $env:TEMP 'vt-check.txt') -Raw
 if ($check.ExitCode -ne 0 -or $checkResult.Trim() -ne 'ok') { throw "Self-check failed:`n$checkResult" }
 Set-Content -LiteralPath (Join-Path $publishRoot 'VERSION.txt') -Value $version -NoNewline
@@ -49,8 +49,12 @@ $ffmpegExe = Join-Path $toolsRoot 'ffmpeg.exe'
 $ErrorActionPreference = 'Continue'
 $versionText = (& $ffmpegExe -version 2>&1 | ForEach-Object { "$_" } | Select-Object -First 1) -join "`n"
 $encoders = (& $ffmpegExe -hide_banner -encoders 2>&1 | ForEach-Object { "$_" } | Out-String)
+$filters = (& $ffmpegExe -hide_banner -filters 2>&1 | ForEach-Object { "$_" } | Out-String)
 $ErrorActionPreference = 'Stop'
 if ($encoders -notmatch 'libx264') { throw 'The bundled FFmpeg has no libx264 encoder, which exact-frame export needs.' }
+foreach ($filter in @('zscale', 'tonemap', 'libplacebo', 'sidedata')) {
+  if ($filters -notmatch "\b$filter\b") { throw "The bundled FFmpeg has no $filter filter, which HDR export needs." }
+}
 @(
   $versionText
   "Build source: https://github.com/BtbN/FFmpeg-Builds/releases/tag/$ffmpegRelease"
@@ -64,7 +68,15 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'UPDATE.md') -Destination $publis
 if ($Zip) {
   $zipPath = "$publishRoot.zip"
   if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
-  Compress-Archive -Path (Join-Path $publishRoot '*') -DestinationPath $zipPath
+  Add-Type -AssemblyName System.IO.Compression
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $archive = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+  try {
+    Get-ChildItem -LiteralPath $publishRoot -File -Recurse | ForEach-Object {
+      $entry = $_.FullName.Substring($publishRoot.Length).TrimStart([char[]]'\/').Replace('\', '/')
+      [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $_.FullName, $entry, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+    }
+  } finally { $archive.Dispose() }
   Write-Host "Zipped $zipPath"
 }
 # build-installer.ps1 reads the publish folder from this last line.

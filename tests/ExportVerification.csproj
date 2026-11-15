@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup><ItemGroup>
+<Compile Include="../ExportService.cs" Link="ExportService.cs" />
+<Compile Include="../HdrExport.cs" Link="HdrExport.cs" />
+<Compile Include="../MediaProbe.cs" Link="MediaProbe.cs" />
+<Compile Include="../ExactExportOptions.cs" Link="ExactExportOptions.cs" />
+<Compile Include="../FfmpegRunner.cs" Link="FfmpegRunner.cs" />
+<Compile Include="../OutputFormat.cs" Link="OutputFormat.cs" />
+<Compile Include="../CutList.cs" Link="CutList.cs" />
+</ItemGroup></Project>

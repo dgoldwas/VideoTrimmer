@@ -8,7 +8,12 @@ namespace VideoTrimmer;
 /// first video stream's codec_name and <see cref="AudioCodecs"/> every audio stream's, in order.
 /// </summary>
 readonly record struct MediaInfo(double Duration, double Fps, long Frames, bool HasAudio, double Aspect, IReadOnlyList<SubtitleTrack> Subtitles,
-    string VideoCodec, IReadOnlyList<string> AudioCodecs);
+    string VideoCodec, IReadOnlyList<string> AudioCodecs, VideoColor Color = default);
+
+readonly record struct VideoColor(string? Transfer, string? Primaries, string? Matrix, int DolbyProfile = 0, int Compatibility = 0)
+{
+    public bool IsHdr => DolbyProfile > 0 || Transfer is "smpte2084" or "arib-std-b67";
+}
 
 /// <summary>A subtitle stream in the source. <see cref="Index"/> counts subtitle streams only, as in FFmpeg's <c>0:s:N</c>.</summary>
 readonly record struct SubtitleTrack(int Index, string Codec, string? Language, string? Title)
@@ -55,7 +60,24 @@ static class MediaProbe
             path,
         ], cancellationToken).ConfigureAwait(false);
 
-        return Parse(json);
+        var media = Parse(json);
+        if (media.Color.Transfer is null or "unknown")
+        {
+            // Some containers expose colorimetry only after decoding. Bound this to eight opening video packets.
+            var frames = await runner.RunAsync(runner.Ffprobe, ["-v", "quiet", "-print_format", "json",
+                "-select_streams", "v:0", "-read_intervals", "%+#8", "-show_frames",
+                "-show_entries", "frame=color_transfer,color_primaries,color_space", path], cancellationToken).ConfigureAwait(false);
+            using var frameDoc = JsonDocument.Parse(frames);
+            if (frameDoc.RootElement.TryGetProperty("frames", out var list))
+                foreach (var frame in list.EnumerateArray())
+                {
+                    var color = Color(frame);
+                    if (color.Transfer is null or "unknown") continue;
+                    media = media with { Color = color with { DolbyProfile = media.Color.DolbyProfile, Compatibility = media.Color.Compatibility } };
+                    break;
+                }
+        }
+        return media;
     }
 
     public static MediaInfo Parse(string json)
@@ -88,7 +110,22 @@ static class MediaProbe
         var rounded = Math.Round(probedDuration * probedFps, MidpointRounding.AwayFromZero);
         if (rounded < 1 || rounded > 1_000_000_000)
             throw new InvalidOperationException("The video duration or frame rate could not be read.");
-        return new MediaInfo(probedDuration, probedFps, (long)rounded, hasAudio, DisplayAspect(video), Subtitles(root), Codec(video), audioCodecs);
+        return new MediaInfo(probedDuration, probedFps, (long)rounded, hasAudio, DisplayAspect(video), Subtitles(root), Codec(video), audioCodecs, Color(video));
+    }
+
+    static VideoColor Color(JsonElement video)
+    {
+        string? Tag(string key) => video.TryGetProperty(key, out var value) ? value.GetString() : null;
+        var profile = 0;
+        var compatibility = 0;
+        if (video.TryGetProperty("side_data_list", out var data) && data.ValueKind == JsonValueKind.Array)
+            foreach (var item in data.EnumerateArray())
+                if (item.TryGetProperty("dv_profile", out var p))
+                {
+                    profile = p.GetInt32();
+                    if (item.TryGetProperty("dv_bl_signal_compatibility_id", out var c)) compatibility = c.GetInt32();
+                }
+        return new VideoColor(Tag("color_transfer"), Tag("color_primaries"), Tag("color_space"), profile, compatibility);
     }
 
     static string Codec(JsonElement stream) => stream.TryGetProperty("codec_name", out var name) ? name.GetString() ?? "" : "";
@@ -155,6 +192,10 @@ static class MediaProbe
             ],"format":{"duration":"10.0"}}
             """;
         var info = Parse(json);
+        var hdr = Parse(json.Replace("\"codec_name\":\"wmv3\"", "\"codec_name\":\"hevc\",\"color_transfer\":\"smpte2084\",\"color_primaries\":\"bt2020\",\"color_space\":\"bt2020nc\""));
+        Expect(hdr.Color.IsHdr && hdr.Color.Primaries == "bt2020", "PQ metadata identifies HDR without frame scanning");
+        var dolby = Parse(json.Replace("\"codec_name\":\"wmv3\"", "\"codec_name\":\"hevc\",\"side_data_list\":[{\"side_data_type\":\"DOVI configuration record\",\"dv_profile\":5,\"dv_bl_signal_compatibility_id\":0}]"));
+        Expect(dolby.Color.IsHdr && dolby.Color.DolbyProfile == 5, "Dolby Vision is detected even without HDR transfer tags");
         var subtitles = info.Subtitles;
         Expect(info.VideoCodec == "wmv3" && info.AudioCodecs is ["truehd", "ac3"] && info.HasAudio, "the video and audio codecs are read");
         Expect(subtitles.Count == 2, "teletext is left out of the subtitle tracks");

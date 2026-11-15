@@ -1,5 +1,13 @@
 # Updates
 
+## 2026-11-15 (2026.11.15.08)
+
+- HDR/PQ and HLG exports automatically use exact-frame re-encoding to SDR BT.709. The CPU pipeline uses FrameGrabber's linear-light Mobius tone map. Dolby Vision uses libplacebo when available; CPU fallback is limited to compatible HDR10/HLG base layers.
+- Every exported audio track is folded down to stereo AAC at 192 kbps, including Fast video copy. The audio-copy toggle is replaced by an explicit output label.
+- Status and progress now have a full-width strip below the timeline, with a separate progress bar and percentage. The title bar has more room for file details; Cancel stays beside Export.
+- Exports still seek before opening each input, decoding only the selected sections and their keyframe lead-in. Missing stream color tags trigger a bounded check of eight opening video packets.
+- Build checks require the HDR filters. ZIP entries use forward slashes.
+
 ## 2026-11-15 (2026.11.15.07)
 
 - **Menu bar:** **File**, **Edit** and **Help** menus in the title bar replace the **⋯** button. File has **New**, **Open video…**, **Open project…**, **Save project**, **Save project as…**, **Export…** and **Exit**; Edit has **Undo**, **Redo**, the segment commands and **Settings…**; Help has the shortcuts, updates and About. `Alt` and the underlined letters reach them from the keyboard.

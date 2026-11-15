@@ -797,9 +797,8 @@ sealed class DropPrompt : GlassControl
 enum StatusKind { Info, Busy, Good, Error }
 
 /// <summary>
-/// The window's title bar: the File, Edit and Help menus and the file and its details on the left, the status in the
-/// middle, Open, then minimize, maximize and close on the right. It replaces the native caption, the old toolbar and
-/// the status bar. Its empty parts and its labels drag the window.
+/// The title bar holds menus, file details and window controls. Work status lives below the timeline.
+/// Its empty parts and its labels drag the window.
 /// </summary>
 sealed class TopBar : GlassControl
 {
@@ -811,20 +810,16 @@ sealed class TopBar : GlassControl
     public bool HelpDot { get; set; }
     public GlassLabel FileName { get; }
     public GlassLabel Meta { get; }
-    public GlassLabel Status { get; }
     public GlassButton Open { get; }
     public GlassButton Minimize { get; }
     public GlassButton Maximize { get; }
     public GlassButton Close { get; }
 
-    StatusKind statusKind;
-    Rectangle dotRect;
 
     public TopBar()
     {
         FileName = new GlassLabel { Text = "VideoTrimmer", Font = Theme.Ui(10, FontStyle.Bold), AccessibleName = "File name" };
         Meta = new GlassLabel { ForeColor = Theme.Muted, Font = Theme.Ui(9), AccessibleName = "Video details" };
-        Status = new GlassLabel { ForeColor = Theme.Muted, Font = Theme.Ui(9), Align = ContentAlignment.MiddleRight, AccessibleName = "Status" };
         Open = new GlassButton { Text = "Open", AccessibleName = "Open a video" };
         FileMenu = Menus.Top("&File");
         EditMenu = Menus.Top("&Edit");
@@ -842,9 +837,9 @@ sealed class TopBar : GlassControl
         Maximize.PartOfCaption = true;
         Close = Caption(Icon.Close, "Close");
         Close.HoverFill = Color.FromArgb(196, 43, 28);
-        Controls.AddRange([Menu, FileName, Meta, Status, Open, Minimize, Maximize, Close]);
+        Controls.AddRange([Menu, FileName, Meta, Open, Minimize, Maximize, Close]);
         PartOfCaption = true;
-        foreach (var label in new[] { FileName, Meta, Status })
+        foreach (var label in new[] { FileName, Meta })
             WindowChrome.ActAsCaption(label);
     }
 
@@ -855,21 +850,6 @@ sealed class TopBar : GlassControl
         Maximize.Icon = maximized ? Icon.Restore : Icon.Maximize;
         Maximize.AccessibleName = maximized ? "Restore" : "Maximize";
         Maximize.Invalidate();
-    }
-
-    public void SetStatus(string text, StatusKind kind)
-    {
-        Status.Text = text;
-        Status.AccessibleName = text;
-        Status.ForeColor = kind switch
-        {
-            StatusKind.Error => Theme.Caution,
-            StatusKind.Busy or StatusKind.Good => Theme.Text,
-            _ => Theme.Muted,
-        };
-        statusKind = kind;
-        PerformLayout();
-        Invalidate();
     }
 
     protected override void OnLayout(LayoutEventArgs levent)
@@ -889,11 +869,7 @@ sealed class TopBar : GlassControl
         Menu.SetBounds(menuLeft, y, Menu.GetPreferredSize(Size.Empty).Width, height);
         var left = Menu.Right + S(10);
         var room = Math.Max(S(40), Open.Left - S(14) - left);
-        var statusWidth = Math.Min(Status.MeasureWidth() + S(2), Math.Max(S(60), room * 45 / 100));
-        Status.SetBounds(Open.Left - S(14) - statusWidth, 0, statusWidth, ClientSize.Height - 1);
-        dotRect = new Rectangle(Status.Left - S(13), (ClientSize.Height - S(6)) / 2, S(6), S(6));
-
-        var textRoom = Math.Max(S(20), dotRect.Left - S(14) - left);
+        var textRoom = room;
         var nameWidth = Math.Min(FileName.MeasureWidth() + S(2), Meta.Text.Length > 0 ? textRoom * 60 / 100 : textRoom);
         FileName.SetBounds(left, 0, nameWidth, ClientSize.Height - 1);
         Meta.SetBounds(FileName.Right + S(12), 0, Math.Max(0, left + textRoom - FileName.Right - S(12)), ClientSize.Height - 1);
@@ -905,18 +881,6 @@ sealed class TopBar : GlassControl
         PaintBase(g);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         Icons.Draw(g, Icon.Split, new RectangleF(S(14), (ClientSize.Height - S(18)) / 2f, S(18), S(18)), Theme.AccentInk);
-        if (Status.Text.Length > 0)
-        {
-            // Picked at paint time, so it follows a switch of theme or accent.
-            using var brush = new SolidBrush(statusKind switch
-            {
-                StatusKind.Error => Theme.Caution,
-                StatusKind.Busy => Theme.AccentInk,
-                _ => Theme.Good,
-            });
-            g.FillEllipse(brush, dotRect);
-        }
-
         using var line = new Pen(Theme.Hairline);
         g.DrawLine(line, 0, ClientSize.Height - 1, ClientSize.Width, ClientSize.Height - 1);
     }
@@ -1186,7 +1150,7 @@ sealed class ExportBar : GlassControl
 {
     public Segmented Mode { get; }
     public Segmented Quality { get; }
-    public ToggleSwitch CopyAudio { get; }
+    public GlassLabel AudioOutput { get; }
     public GlassButton Subtitles { get; }
     public GlassButton Format { get; }
     public GlassButton Export { get; }
@@ -1198,13 +1162,12 @@ sealed class ExportBar : GlassControl
     readonly List<(string Label, Rectangle Row)> rows = new();
     bool exactMode;
     ExactQuality quality = ExactExportOptions.Default.Quality;
-    bool copyAudio;
+    VideoColor color;
     IReadOnlyList<SubtitleTrack> subtitleTracks = [];
     SubtitleTrack? burn;
     OutputFormat format;
     string sourceExtension = "";
     string videoCodec = "";
-    IReadOnlyList<string> audioCodecs = [];
     int segments = 1;
     bool busy;
     bool ready;
@@ -1214,17 +1177,16 @@ sealed class ExportBar : GlassControl
         OnPanel = true;
         Mode = new Segmented { Items = [ExportModeCopy.FastTitle, ExportModeCopy.ExactTitle], AccessibleName = "Export mode", OnPanel = true };
         Quality = new Segmented { Items = Qualities.Select(ExactExportPresets.Title).ToArray(), Font = Theme.Ui(9), AccessibleName = "Quality", Visible = false, OnPanel = true };
-        CopyAudio = new ToggleSwitch { Text = ExportModeCopy.CopyAudioTitle, AccessibleName = ExportModeCopy.CopyAudioTitle, Visible = false, OnPanel = true };
+        AudioOutput = new GlassLabel { Text = "Stereo AAC · 192 kbps", AccessibleName = "Audio output: stereo AAC, 192 kbps", Font = Theme.Ui(9.5f), OnPanel = true };
         Subtitles = new GlassButton { AlignLeft = true, Chevron = true, Font = Theme.Ui(9.5f), AccessibleName = "Burn in subtitles", Visible = false, OnPanel = true };
         Format = new GlassButton { AlignLeft = true, Chevron = true, Font = Theme.Ui(9.5f), AccessibleName = "Output format", OnPanel = true };
         Export = new GlassButton { Text = "Export…", Kind = ButtonKind.Primary, AccessibleName = "Export", Enabled = false, OnPanel = true };
         Cancel = new GlassButton { Text = "Cancel", Kind = ButtonKind.Caution, AccessibleName = "Cancel export", Enabled = false, Visible = false, OnPanel = true };
         Explanation = new GlassLabel { ForeColor = Theme.Muted, Font = Theme.Ui(9), Wrap = true, OnPanel = true };
-        Controls.AddRange([Mode, Quality, CopyAudio, Subtitles, Format, Explanation, Export, Cancel]);
+        Controls.AddRange([Mode, Quality, AudioOutput, Subtitles, Format, Explanation, Export, Cancel]);
 
         Mode.Picked += index => ModePicked?.Invoke(index == 1);
         Quality.Picked += index => SetQuality(Qualities[index]);
-        CopyAudio.Toggled += SetCopyAudio;
         Subtitles.Click += (_, _) => ChooseSubtitles();
         Format.Click += (_, _) => ChooseFormat();
 
@@ -1237,7 +1199,7 @@ sealed class ExportBar : GlassControl
     /// <summary>An option changed in a way that can change this bar's height.</summary>
     public event EventHandler? OptionsChanged;
 
-    public ExactExportOptions ExactOptions => new(quality, copyAudio, burn);
+    public ExactExportOptions ExactOptions => new(quality, burn, color);
 
     public OutputFormat OutputFormat => format;
 
@@ -1245,10 +1207,10 @@ sealed class ExportBar : GlassControl
 
     public void SetMode(bool exact)
     {
+        exact |= color.IsHdr;
         exactMode = exact;
         Mode.SelectedIndex = exact ? 1 : 0;
         Quality.Visible = exact;
-        CopyAudio.Visible = exact;
         Subtitles.Visible = exact && HasSubtitles;
         Sync();
         PerformLayout();
@@ -1259,11 +1221,10 @@ sealed class ExportBar : GlassControl
     public void SetBusy(bool value)
     {
         busy = value;
-        Mode.Enabled = !value;
+        Mode.Enabled = !value && !color.IsHdr;
         Format.Enabled = !value;
         Cancel.Enabled = value;
         Cancel.Visible = value;
-        if (!value) Export.Progress = -1;
         Sync();
         PerformLayout();
     }
@@ -1271,10 +1232,11 @@ sealed class ExportBar : GlassControl
     /// <summary>A new video starts with nothing burned in and its own container as the format's reference.</summary>
     public void SetSource(string extension, MediaInfo media)
     {
+        color = media.Color;
+        Mode.Enabled = !busy && !color.IsHdr;
         sourceExtension = extension;
         subtitleTracks = media.Subtitles;
         videoCodec = media.VideoCodec;
-        audioCodecs = media.AudioCodecs;
         burn = null;
         ready = true;
         SetMode(exactMode);
@@ -1293,7 +1255,7 @@ sealed class ExportBar : GlassControl
     public int MeasureHeight(int width)
     {
         var height = S(36) + S(8);
-        var optionRows = 1 + (exactMode ? 2 + (HasSubtitles ? 1 : 0) : 0);
+        var optionRows = 2 + (exactMode ? 1 + (HasSubtitles ? 1 : 0) : 0);
         height += optionRows * S(RowHeight) + (optionRows - 1) * S(4);
         height += S(10) + Explanation.MeasureHeight(width) + S(12) + S(40);
         return height;
@@ -1303,13 +1265,6 @@ sealed class ExportBar : GlassControl
     {
         if (!exactMode || quality == value) return;
         quality = value;
-        Sync();
-    }
-
-    void SetCopyAudio(bool value)
-    {
-        if (!exactMode || copyAudio == value || segments > 1) return;
-        copyAudio = value;
         Sync();
     }
 
@@ -1363,26 +1318,22 @@ sealed class ExportBar : GlassControl
         && !OutputFormats.Extension(format, sourceExtension).Equals(sourceExtension, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// The streams this export would copy into a new container that can't hold them. Fast copy copies everything; Exact
-    /// frames copies only the audio, and only with Copy original on a single segment. Export stays off while any are listed,
+    /// Video codecs that cannot be copied into the selected container. Audio always becomes stereo AAC.
+    /// Export stays off while any are listed,
     /// since FFmpeg would fail on them partway in.
     /// </summary>
     IReadOnlyList<string> Misfits()
     {
         if (!Converts) return [];
         var target = OutputFormats.Extension(format, sourceExtension);
-        if (!exactMode) return OutputFormats.Misfits(target, videoCodec, audioCodecs);
-        return copyAudio && segments == 1 ? OutputFormats.Misfits(target, videoCodec, audioCodecs, includeVideo: false) : [];
+        if (!exactMode) return OutputFormats.Misfits(target, videoCodec, []);
+        return [];
     }
 
     void Sync()
     {
         Quality.SelectedIndex = Array.IndexOf(Qualities, quality);
         Quality.Enabled = !busy;
-        CopyAudio.Checked = copyAudio && segments == 1;
-        // A multi-segment re-encode joins audio in a filter graph, so it cannot be copied.
-        CopyAudio.Enabled = !busy && segments == 1;
-        CopyAudio.AccessibleDescription = ExactExportPresets.AudioHint(copyAudio);
         Subtitles.Enabled = !busy;
         Subtitles.Text = burn is { } track ? track.Label : "Off";
         Subtitles.AccessibleDescription = ExactExportPresets.SubtitleHint(burn);
@@ -1397,7 +1348,7 @@ sealed class ExportBar : GlassControl
         // Picture subtitles go only when nothing is burned in: a burned-in export carries no subtitle streams anyway.
         var dropsPictures = Converts && OutputFormats.IsMp4Family(OutputFormats.Extension(format, sourceExtension))
             && subtitleTracks.Any(track => track.IsBitmap) && !(exactMode && burn is not null);
-        var text = ExportModeCopy.Summary(exactMode, ExactOptions, segments, Converts ? OutputFormats.Name(format) : null, misfits, dropsPictures)
+        var text = (color.IsHdr ? "HDR → SDR · BT.709. " : "") + ExportModeCopy.Summary(exactMode, ExactOptions, segments, Converts ? OutputFormats.Name(format) : null, misfits, dropsPictures)
             + (!exactMode && HasSubtitles && misfits.Count == 0 ? " " + ExportModeCopy.FastSubtitlesHint : "");
         if (Explanation.Text != text)
         {
@@ -1435,10 +1386,10 @@ sealed class ExportBar : GlassControl
         if (exactMode)
         {
             Row("Quality", Quality, S(1));
-            Row("Audio", CopyAudio);
             if (HasSubtitles) Row("Subtitles", Subtitles, S(1));
         }
 
+        Row("Audio", AudioOutput);
         Row("Format", Format, S(1));
         y += S(10) - S(4);
         var explanation = Explanation.MeasureHeight(width);

@@ -38,6 +38,8 @@ static class ExportService
         ExactExportOptions? exactOptions = null,
         Remux? remux = null)
     {
+        var options = exactOptions ?? ExactExportOptions.Default;
+        exact |= options.Color.IsHdr;
         var start = Text(inSeconds);
         var length = Text(outSeconds - inSeconds);
         var (maps, subtitleCodecs) = Streams(remux);
@@ -54,19 +56,18 @@ static class ExportService
                 "-t", length,
                 .. maps,
                 "-c", "copy",
+                .. StereoAudio,
                 .. subtitleCodecs,
                 "-avoid_negative_ts", "make_zero",
                 output,
             ];
         }
 
-        var options = exactOptions ?? ExactExportOptions.Default;
         var (crf, preset) = ExactExportPresets.Encoder(options.Quality);
-        var audioCodec = options.CopyAudio ? "copy" : "aac";
         // Burning in draws the track on the first video stream, so the subtitle streams are left out rather than shown twice.
         var burning = options.BurnSubtitles is not null;
         string[] streams = options.BurnSubtitles is { } burn
-            ? ["-filter_complex", BurnFilter(input, burn, 0, Seek(inSeconds)) + "[v]", "-map", "[v]", "-map", "0:a?"]
+            ? ["-filter_complex", BurnFilter(input, burn, 0, Seek(inSeconds), options) + "[v]", "-map", "[v]", "-map", "0:a?"]
             : maps;
         return
         [
@@ -78,7 +79,9 @@ static class ExportService
             "-c:v", "libx264",
             "-crf", crf.ToString(CultureInfo.InvariantCulture),
             "-preset", preset,
-            "-c:a", audioCodec,
+            .. StereoAudio,
+            .. options.Color.IsHdr && !burning ? new[] { "-vf", HdrExport.Filter(options.Color, options.UseLibplacebo) } : [],
+            .. HdrExport.OutputTags(options.Color),
             .. burning ? [] : subtitleCodecs,
             output,
         ];
@@ -115,13 +118,18 @@ static class ExportService
     /// go through libass (with any fonts the file carries), which reads the whole track on the source timeline, so the
     /// frames are moved back to their source times while it draws.
     /// </summary>
-    static string BurnFilter(string input, SubtitleTrack track, int file, double seek)
+    static string BurnFilter(string input, SubtitleTrack track, int file, double seek, ExactExportOptions options)
     {
-        if (track.IsBitmap) return $"[{file}:v:0][{file}:s:{track.Index}]overlay";
+        var tone = HdrExport.Filter(options.Color, options.UseLibplacebo);
+        var prefix = $"[{file}:v:0]";
+        if (track.IsBitmap)
+            return tone.Length == 0 ? $"{prefix}[{file}:s:{track.Index}]overlay"
+                : $"{prefix}{tone}[toned{file}];[toned{file}][{file}:s:{track.Index}]overlay";
+        if (tone.Length > 0) prefix += tone + ",";
         var subtitles = $"subtitles=filename={FilterValue(Path.GetFullPath(input).Replace('\\', '/'))}:si={track.Index}";
-        if (seek <= 0) return $"[{file}:v:0]{subtitles}";
+        if (seek <= 0) return $"{prefix}{subtitles}";
         var offset = Text(seek);
-        return $"[{file}:v:0]setpts=PTS+{offset}/TB,{subtitles},setpts=PTS-{offset}/TB";
+        return $"{prefix}setpts=PTS+{offset}/TB,{subtitles},setpts=PTS-{offset}/TB";
     }
 
     /// <summary>
@@ -168,6 +176,7 @@ static class ExportService
             return new ExportPlan([new ExportStep(BuildArguments(input, output, Sec(only.In), Sec(only.Out), exact, exactOptions, remux), total, 1)], null, null, null, [output]);
         }
 
+        exact |= exactOptions?.Color.IsHdr == true;
         if (exact)
             return new ExportPlan([new ExportStep(BuildExactConcat(input, output, segments, fps, hasAudio, exactOptions ?? ExactExportOptions.Default), total, 1)], null, null, null, [output]);
 
@@ -246,7 +255,7 @@ static class ExportService
         {
             var seek = Seek(segments[i].In / fps);
             args.AddRange(["-ss", Text(seek), "-t", Text((segments[i].Out - segments[i].In) / fps), "-i", input]);
-            graph.Append(options.BurnSubtitles is { } burn ? BurnFilter(input, burn, i, seek) + "," : $"[{i}:v:0]")
+            graph.Append(options.BurnSubtitles is { } burn ? BurnFilter(input, burn, i, seek, options) + "," : $"[{i}:v:0]" + (options.Color.IsHdr ? HdrExport.Filter(options.Color, options.UseLibplacebo) + "," : ""))
                 .Append($"setpts=PTS-STARTPTS[v{i}];");
             if (hasAudio) graph.Append($"[{i}:a:0]asetpts=PTS-STARTPTS[a{i}];");
         }
@@ -264,10 +273,13 @@ static class ExportService
         args.AddRange(["-filter_complex", graph.ToString(), "-map", "[v]"]);
         if (hasAudio) args.AddRange(["-map", "[a]"]);
         args.AddRange(["-c:v", "libx264", "-crf", crf.ToString(CultureInfo.InvariantCulture), "-preset", preset]);
-        if (hasAudio) args.AddRange(["-c:a", "aac"]);
+        if (hasAudio) args.AddRange(StereoAudio);
+        args.AddRange(HdrExport.OutputTags(options.Color));
         args.Add(output);
         return args.ToArray();
     }
+
+    static readonly string[] StereoAudio = ["-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "192k"];
 
     static string Text(double seconds) => seconds.ToString("0.######", CultureInfo.InvariantCulture);
 
@@ -310,16 +322,18 @@ static class ExportService
         Expect(string.Join(" ", fast).Contains("-map 0 -map -0:d"), "data tracks are left out");
 
         var balanced = BuildArguments("in.mp4", "out.mp4", 1, 5, exact: true, ExactExportOptions.Default);
+        Expect(string.Join(" ", balanced).Contains("-ac 2"), "exact exports fold audio down to stereo");
+        Expect(string.Join(" ", fast).Contains("-c:a aac") && string.Join(" ", fast).Contains("-ac 2"), "fast exports copy video but downmix audio");
         Expect(balanced.Contains("-crf") && balanced.Contains("23"), "balanced crf 23");
         Expect(balanced.Contains("medium"), "balanced preset");
         Expect(balanced.Contains("aac"), "default audio aac");
 
-        var high = BuildArguments("in.mp4", "out.mp4", 1, 5, exact: true, new ExactExportOptions(ExactQuality.High, CopyAudio: true));
+        var high = BuildArguments("in.mp4", "out.mp4", 1, 5, exact: true, new ExactExportOptions(ExactQuality.High));
         Expect(high.Contains("18") && high.Contains("slow"), "high quality encoder");
         var copyIndex = Array.IndexOf(high, "-c:a");
-        Expect(copyIndex >= 0 && copyIndex + 1 < high.Length && high[copyIndex + 1] == "copy", "copy audio");
+        Expect(copyIndex >= 0 && copyIndex + 1 < high.Length && high[copyIndex + 1] == "aac", "high quality also exports stereo AAC");
 
-        var small = BuildArguments("in.mp4", "out.mp4", 1, 5, exact: true, new ExactExportOptions(ExactQuality.Small, false));
+        var small = BuildArguments("in.mp4", "out.mp4", 1, 5, exact: true, new ExactExportOptions(ExactQuality.Small));
         Expect(small.Contains("28") && small.Contains("veryfast"), "small quality encoder");
 
         var single = Plan("in.mp4", "out.mp4", [new Segment(30, 150)], 30, hasAudio: true, exact: false);
@@ -347,9 +361,9 @@ static class ExportService
         Expect(fastPlan.Steps[^1].Arguments.Contains("concat") && fastPlan.Steps[^1].Arguments[^1] == Path.Combine("C:\\clips", "out.mp4"), "join writes the output");
 
         var showPath = Path.GetFullPath("show.mkv");
-        var separate = PlanSeparate("in.mp4", showPath, two, 30, exact: true, new ExactExportOptions(ExactQuality.High, CopyAudio: true));
+        var separate = PlanSeparate("in.mp4", showPath, two, 30, exact: true, new ExactExportOptions(ExactQuality.High));
         Expect(separate.Outputs.Select(Path.GetFileName).SequenceEqual(["show_01.mkv", "show_02.mkv"]), "separate files are numbered");
-        Expect(separate.Steps.Count == 2 && separate.Steps[1].Arguments.SequenceEqual(BuildArguments("in.mp4", separate.Outputs[1], 10, 11, exact: true, new ExactExportOptions(ExactQuality.High, CopyAudio: true))), "each separate file uses the single-cut arguments");
+        Expect(separate.Steps.Count == 2 && separate.Steps[1].Arguments.SequenceEqual(BuildArguments("in.mp4", separate.Outputs[1], 10, 11, exact: true, new ExactExportOptions(ExactQuality.High))), "each separate file uses the single-cut arguments");
         Expect(Path.GetFileName(SeparateOutputs("a.mp4", 120)[0]) == "a_001.mp4", "numbering widens past 99");
 
         Expect(FilterValue(@"C:/a'b [x].mkv") == @"C\\:/a\\\'b \[x\].mkv", "filter values are escaped for both parsers");
@@ -371,14 +385,26 @@ static class ExportService
         Expect(Remux.For("in.mkv", "out.MKV", []) is null, "the same container is not a conversion");
         SubtitleTrack[] mixed = [english, new SubtitleTrack(2, "hdmv_pgs_subtitle", null, null), new SubtitleTrack(3, "ass", null, null)];
         var toMp4 = string.Join(" ", BuildArguments("in.mkv", "out.mp4", 1, 5, exact: false, remux: Remux.For("in.mkv", "out.mp4", mixed)));
-        Expect(toMp4.Contains("-map 0:V -map 0:a? -map 0:s:1 -map 0:s:3 -c copy -c:s:0 mov_text -c:s:1 mov_text"), "MP4 takes video, audio and text subtitles as mov_text, and leaves picture subtitles out");
+        Expect(toMp4.Contains("-map 0:V -map 0:a? -map 0:s:1 -map 0:s:3 -c copy") && toMp4.Contains("-c:s:0 mov_text -c:s:1 mov_text"), "MP4 takes video, audio and text subtitles as mov_text, and leaves picture subtitles out");
         Expect(!toMp4.Contains("-map 0 "), "a conversion never maps every stream");
         var toMkv = string.Join(" ", BuildArguments("in.mp4", "out.mkv", 1, 5, exact: true, remux: Remux.For("in.mp4", "out.mkv", [new SubtitleTrack(0, "mov_text", null, null), mixed[1]])));
-        Expect(toMkv.Contains("-map 0:V -map 0:a? -map 0:s:0 -map 0:s:2") && toMkv.Contains("-c:a aac -c:s:0 srt -c:s:1 copy"), "MKV takes text subtitles as SRT and picture subtitles as they are");
+        Expect(toMkv.Contains("-map 0:V -map 0:a? -map 0:s:0 -map 0:s:2") && toMkv.Contains("-c:s:0 srt -c:s:1 copy"), "MKV takes text subtitles as SRT and picture subtitles as they are");
         var burnedMp4 = string.Join(" ", BuildArguments("in.mkv", "out.mp4", 1, 5, exact: true, ExactExportOptions.Default with { BurnSubtitles = english }, Remux.For("in.mkv", "out.mp4", mixed)));
         Expect(!burnedMp4.Contains("-c:s") && !burnedMp4.Contains("0:s:3"), "a burned-in conversion carries no subtitle streams");
         var convertedParts = Plan("in.mkv", Path.Combine("C:\\clips", "out.mp4"), two, 30, hasAudio: true, exact: false, remux: Remux.For("in.mkv", "out.mp4", mixed));
         Expect(convertedParts.Steps[0].Arguments.Contains("0:V") && convertedParts.Steps[^1].Arguments.Contains("0"), "multi-cut converts in the parts and joins them as they are");
+        var hdrOptions = ExactExportOptions.Default with { Color = new VideoColor("smpte2084", "bt2020", "bt2020nc") };
+        var hdrArgs = BuildArguments("in.mkv", "out.mp4", 3600, 3604, exact: false, hdrOptions);
+        var hdrText = string.Join(" ", hdrArgs);
+        Expect(hdrText.Contains("-ss 3599.999 -i in.mkv -t 4"), "HDR cuts seek directly to an hour into the source");
+        Expect(hdrText.Contains("tonemap=") && hdrText.Contains("-color_trc bt709") && hdrText.Contains("-ac 2"), "HDR is tone mapped and labeled SDR with stereo audio even in fast mode");
+        var hdrConcat = Plan("in.mkv", "out.mp4", two, 30, true, false, hdrOptions);
+        Expect(hdrConcat.Steps.Count == 1 && string.Join(" ", hdrConcat.Steps[0].Arguments).Split("tonemap=").Length == 5, "every HDR segment is tone mapped before concat");
+        var hdrSeparate = PlanSeparate("in.mkv", "out.mp4", two, 30, false, hdrOptions);
+        Expect(hdrSeparate.Steps.All(step => string.Join(" ", step.Arguments).Contains("-color_trc bt709")), "separate HDR exports all carry SDR color tags");
+        var dolbyOptions = hdrOptions with { Color = new VideoColor(null, null, null, 5), UseLibplacebo = true };
+        Expect(string.Join(" ", BuildArguments("in.mkv", "out.mp4", 1, 2, false, dolbyOptions)).Contains("apply_dolbyvision=true"), "Dolby Vision uses metadata aware conversion");
+        Expect(!HdrExport.CanUseCpu(dolbyOptions.Color) && HdrExport.CanUseCpu(new VideoColor(null, null, null, 8, 1)), "CPU fallback requires a compatible Dolby base layer");
         return errors;
     }
 }

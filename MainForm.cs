@@ -19,6 +19,7 @@ public sealed partial class MainForm : Form
     readonly AppSettings settings;
 
     readonly TopBar topBar = new();
+    readonly WorkStatus workStatus = new();
     readonly DropPrompt drop = new();
     readonly Panel previewHost = new();
     readonly PictureBox preview = new();
@@ -53,6 +54,7 @@ public sealed partial class MainForm : Form
     double aspect = 16 / 9d;
     bool exact;
     bool hasAudio;
+    VideoColor sourceColor;
     bool exporting;
     bool syncing;
     bool sized;
@@ -134,7 +136,7 @@ public sealed partial class MainForm : Form
         timeline.ShowLane = WaveformEnabled;
         side.Visible = false;
 
-        Controls.AddRange([topBar, drop, previewHost, transport, timeline, side]);
+        Controls.AddRange([topBar, drop, previewHost, transport, timeline, side, workStatus]);
 
         topBar.Open.Click += (_, _) => Browse();
         WireMenus();
@@ -204,7 +206,7 @@ public sealed partial class MainForm : Form
         tips.SetToolTip(exportBar.Mode, ExportModeCopy.FastTitle + ": " + ExportModeCopy.FastExplanation + "\n" + ExportModeCopy.ExactTitle + ": " + ExportModeCopy.ExactBaseExplanation);
         tips.SetToolTip(exportBar.Quality, string.Join("\n", new[] { ExactQuality.High, ExactQuality.Balanced, ExactQuality.Small }
             .Select(quality => ExactExportPresets.Title(quality) + ": " + ExactExportPresets.Hint(quality))));
-        tips.SetToolTip(exportBar.CopyAudio, "Keep the original audio instead of re-encoding to AAC.");
+        tips.SetToolTip(exportBar.AudioOutput, ExactExportPresets.AudioHint());
         tips.SetToolTip(exportBar.Subtitles, "Draw a subtitle track into the picture, so it shows in every player.");
         tips.SetToolTip(exportBar.Format, "The container to save as. Fast copy rewraps the streams; Exact frames re-encodes them.");
 
@@ -475,7 +477,8 @@ public sealed partial class MainForm : Form
             var loaded = timeline.HasMedia;
             var top = S(44);
             topBar.SetBounds(0, 0, ClientSize.Width, top);
-            var bottom = ClientSize.Height;
+            var bottom = ClientSize.Height - S(48);
+            workStatus.SetBounds(0, bottom, ClientSize.Width, S(48));
             var pad = S(12);
             var gap = S(10);
             if (!loaded)
@@ -602,6 +605,7 @@ public sealed partial class MainForm : Form
         duration = media.Duration;
         fps = media.Fps;
         hasAudio = media.HasAudio;
+        sourceColor = media.Color;
         aspect = media.Aspect > 0 ? media.Aspect : 16 / 9d;
         subtitles = media.Subtitles;
         timeline.Aspect = aspect;
@@ -621,6 +625,7 @@ public sealed partial class MainForm : Form
         foreach (Control control in new Control[] { previewHost, transport, timeline, side })
             control.Visible = true;
         exportBar.SetSource(Path.GetExtension(path), media);
+        ChooseExact(exact || media.Color.IsHdr);
         LayoutChrome();
         WriteBoxes();
         UpdateReadouts();
@@ -670,7 +675,7 @@ public sealed partial class MainForm : Form
         var picks = timeline.PickedSegments;
         segmentList.SetSegments(all, timeline.ActiveIndex, timeline.Fps, timeline.PickedIndices);
         exportBar.SetSegmentCount(picks.Count > 0 ? picks.Count : kept.Count);
-        // While an export runs the button is its progress bar, and says so itself.
+        // Keep the export action stable while the status strip reports progress.
         if (!exporting)
         {
             var exportText = picks.Count > 0 ? $"Export {picks.Count} selected…" : all.Count > 1 ? $"Export {all.Count} segments…" : "Export…";
@@ -781,8 +786,8 @@ public sealed partial class MainForm : Form
     void ChooseExact(bool value)
     {
         if (exporting) return;
-        exact = value;
-        exportBar.SetMode(value);
+        exact = value || (timeline.HasMedia && sourceColor.IsHdr);
+        exportBar.SetMode(exact);
         LayoutChrome();
     }
 
@@ -992,7 +997,12 @@ public sealed partial class MainForm : Form
             duration,
             key,
             filmCts.Token,
-            onProgress: (filled, total) => { if (!player.IsPlaying) SetStatus($"Building the filmstrip… {filled}/{total}", StatusKind.Busy); },
+            onProgress: (filled, total) =>
+            {
+                if (exporting || player.IsPlaying) return;
+                SetStatus($"Building the filmstrip… {filled}/{total}", StatusKind.Busy);
+                workStatus.Progress = total > 0 ? (double)filled / total : -1;
+            },
             onCompleted: (any, failure) =>
             {
                 if (exporting || player.IsPlaying) return;
@@ -1161,7 +1171,7 @@ public sealed partial class MainForm : Form
 
         ReplaceCts(ref exportCts);
         var token = exportCts.Token;
-        var mode = exact ? "Encoding exact frames" : "Saving fast copy";
+        var mode = sourceColor.IsHdr ? "Tone-mapping HDR to SDR · Stereo AAC" : exact ? "Encoding exact frames · Stereo AAC" : "Copying video · Stereo AAC";
         if (exact && exportBar.ExactOptions.BurnSubtitles is not null) mode += " with subtitles";
         if (segments.Count > 1) mode += $" of {segments.Count} segments";
         exporting = true;
@@ -1169,14 +1179,20 @@ public sealed partial class MainForm : Form
         timeline.Locked = true;
         exportBar.SetBusy(true);
         exportBar.Export.Text = "Exporting…";
-        exportBar.Export.Progress = 0;
+        workStatus.Progress = -1;
         LayoutChrome();
         SetStatus(mode + "…", StatusKind.Busy);
         var exactOptions = exportBar.ExactOptions;
         ExportPlan? plan = null;
-        var completed = 0;
+        string? activeOutput = null;
         try
         {
+            if (exactOptions.Color.DolbyProfile > 0)
+            {
+                SetStatus("Checking Dolby Vision tone mapping…", StatusKind.Busy);
+                exactOptions = exactOptions with { UseLibplacebo = await HdrExport.SupportsPlaceboAsync(runner, token) };
+                _ = HdrExport.Filter(exactOptions.Color, exactOptions.UseLibplacebo);
+            }
             plan = separate
                 ? ExportService.PlanSeparate(input, output, segments, timeline.Fps, exact, exactOptions, remux)
                 : ExportService.Plan(input, output, segments, timeline.Fps, hasAudio, exact, exactOptions, remux);
@@ -1201,36 +1217,32 @@ public sealed partial class MainForm : Form
                     if (!exporting || IsDisposed) return;
                     var within = Math.Clamp(elapsed.TotalSeconds / Math.Max(0.001, step.Seconds), 0, 1);
                     var fraction = Math.Clamp((before + within * step.Weight) / totalWeight, 0, 1);
-                    var percent = (int)Math.Round(fraction * 100);
-                    exportBar.Export.Progress = fraction;
-                    exportBar.Export.Text = $"Exporting… {percent}%";
-                    SetStatus($"{phase}… {percent}%", StatusKind.Busy);
+                    SetStatus(phase + "…", StatusKind.Busy);
+                    workStatus.Progress = fraction;
                 });
                 SetStatus(phase + "…", StatusKind.Busy);
+                activeOutput = outputs.Contains(step.Arguments[^1]) ? step.Arguments[^1] : null;
                 await runner.RunAsync(runner.Ffmpeg, step.Arguments, token, progress);
+                activeOutput = null;
                 done += step.Weight;
-                completed++;
             }
 
             SetStatus(separate ? $"Saved {outputs.Count} files: {Path.GetFileName(outputs[0])} … {Path.GetFileName(outputs[^1])} in {Path.GetDirectoryName(outputs[0])}" : "Saved: " + output, StatusKind.Good);
         }
         catch (OperationCanceledException)
         {
-            // Files finished before the cancel are kept; the one being written is removed.
-            foreach (var path in separate ? outputs.Skip(completed) : outputs)
-                ExportService.TryDelete(path);
+            // A preflight failure must not delete existing files that FFmpeg never opened.
+            if (activeOutput is not null) ExportService.TryDelete(activeOutput);
             if (!IsDisposed) SetStatus("Export canceled.", StatusKind.Info);
         }
         catch (Exception ex)
         {
-            // As on cancel: what finished is kept, and the half-written file is removed.
-            foreach (var path in separate ? outputs.Skip(completed) : outputs)
-                ExportService.TryDelete(path);
+            if (activeOutput is not null) ExportService.TryDelete(activeOutput);
             if (!IsDisposed)
             {
                 SetStatus("Export failed: " + ex.Message, StatusKind.Error);
                 // A change of container fails when a stream cannot go into the new one; say what to do about it.
-                var hint = remux is null ? "" : ExportModeCopy.ConvertFailedHint(OutputFormats.Name(format), exact, exactOptions.CopyAudio);
+                var hint = remux is null ? "" : ExportModeCopy.ConvertFailedHint(OutputFormats.Name(format), exact);
                 if (hint.Length > 0)
                     MessageBox.Show(this, hint, "VideoTrimmer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
@@ -1437,9 +1449,9 @@ public sealed partial class MainForm : Form
 
     void SetStatus(string text, StatusKind kind)
     {
-        topBar.SetStatus(text, kind);
+        workStatus.SetStatus(text, kind);
         // The bar shortens a long message; the tooltip has all of it.
-        tips.SetToolTip(topBar.Status, text);
+        tips.SetToolTip(workStatus.Message, text);
     }
 
     void ShowShortcuts()

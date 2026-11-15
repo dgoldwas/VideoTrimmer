@@ -1,5 +1,10 @@
 # Updates
 
+## 2026-11-15 (2026.11.15.05)
+
+- **Exact frames exports start at once.** They used to decode (and, with burn-in, draw subtitles on) everything from the start of the video up to the cut before writing anything, so a cut half an hour in sat at 0% for a long time. They now seek straight to the cut and still land on the chosen frame, and the progress bar moves from the start. Exports of several segments do the same, one seek per segment.
+- **Fit** (or `0`) fills the timeline with the selected segment, or with every picked segment, instead of always showing the whole video. Press it again to see the whole video.
+
 ## 2026-11-15 (2026.11.15.04)
 
 - **Settings** (**⋯** menu or `Ctrl+,`): choose a **light or dark theme** and one of seven **accent colors** (Butter, Graphite, Sky, Mint, Rose, Violet, Coral), the same set as WB Tunes. Each choice shows across the app at once; **OK** keeps it and **Cancel** puts the saved look back. Settings are kept in `%LOCALAPPDATA%\VideoTrimmer\settings.json`.

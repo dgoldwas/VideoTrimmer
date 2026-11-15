@@ -1580,7 +1580,7 @@ sealed class TransportBar : GlassControl
         NewSegment.KeyHint = "N";
         ZoomOut = Tool(Icon.Minus, "Zoom out");
         ZoomIn = Tool(Icon.Plus, "Zoom in");
-        Fit = Tool(Icon.None, "Show the whole video");
+        Fit = Tool(Icon.None, "Fit the selection");
         Fit.Text = "Fit";
         ZoomLabel = new GlassLabel { ForeColor = Theme.Muted, Font = Theme.Ui(9), Align = ContentAlignment.MiddleCenter, AccessibleName = "Zoom", OnPanel = true };
         Controls.AddRange([Previous, Play, Next, Readout, Split, NewSegment, ZoomOut, ZoomLabel, ZoomIn, Fit]);

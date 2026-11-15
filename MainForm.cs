@@ -153,7 +153,7 @@ public sealed partial class MainForm : Form
         transport.NewSegment.Click += (_, _) => NewSegment();
         transport.ZoomIn.Click += (_, _) => timeline.ZoomBy(2);
         transport.ZoomOut.Click += (_, _) => timeline.ZoomBy(0.5);
-        transport.Fit.Click += (_, _) => timeline.ZoomToFit();
+        transport.Fit.Click += (_, _) => timeline.ZoomToSelection();
         player.FrameShown += frame =>
         {
             timeline.ShowPlaybackFrame(frame);
@@ -190,7 +190,7 @@ public sealed partial class MainForm : Form
         tips.SetToolTip(transport.Next, "Next cut (.)");
         tips.SetToolTip(transport.ZoomIn, "Zoom in (+ or Ctrl+wheel)");
         tips.SetToolTip(transport.ZoomOut, "Zoom out (− or Ctrl+wheel)");
-        tips.SetToolTip(transport.Fit, "Show the whole video (0)");
+        tips.SetToolTip(transport.Fit, "Fit the selection to the timeline; again to show the whole video (0)");
         tips.SetToolTip(transport.Split, "Split the segment under the playhead in two (S)");
         tips.SetToolTip(transport.NewSegment, "Start a new segment at the playhead (N)");
         tips.SetToolTip(side.Reset, "Throw away the segments and keep the whole video");
@@ -408,7 +408,7 @@ public sealed partial class MainForm : Form
                 return true;
             case Keys.D0:
             case Keys.NumPad0:
-                timeline.ZoomToFit();
+                timeline.ZoomToSelection();
                 return true;
             case Keys.I:
                 Edit(() => timeline.SetInToPlayhead());

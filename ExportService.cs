@@ -41,7 +41,9 @@ static class ExportService
         var start = Text(inSeconds);
         var length = Text(outSeconds - inSeconds);
         var (maps, subtitleCodecs) = Streams(remux);
-        // Exact mode seeks after -i so the cut lands on the chosen frames. Fast copy seeks before -i.
+        // Both modes seek before -i. Fast copy then starts on a keyframe; exact mode decodes from the keyframe before
+        // the cut and drops frames up to it, so the cut still lands on the chosen frame without decoding the whole
+        // file up to it (which stalled long exports at 0%, since nothing is written until the cut is reached).
         if (!exact)
         {
             return
@@ -64,13 +66,13 @@ static class ExportService
         // Burning in draws the track on the first video stream, so the subtitle streams are left out rather than shown twice.
         var burning = options.BurnSubtitles is not null;
         string[] streams = options.BurnSubtitles is { } burn
-            ? ["-filter_complex", BurnFilter(input, burn) + "[v]", "-map", "[v]", "-map", "0:a?"]
+            ? ["-filter_complex", BurnFilter(input, burn, 0, Seek(inSeconds)) + "[v]", "-map", "[v]", "-map", "0:a?"]
             : maps;
         return
         [
             "-y", "-progress", "pipe:1", "-nostats",
+            "-ss", Text(Seek(inSeconds)),
             "-i", input,
-            "-ss", start,
             "-t", length,
             .. streams,
             "-c:v", "libx264",
@@ -107,12 +109,25 @@ static class ExportService
     }
 
     /// <summary>
-    /// Draws <paramref name="track"/> onto the first video stream, which runs on the source timeline, before any trim.
-    /// Text subtitles go through libass (with any fonts the file carries); picture subtitles are overlaid.
+    /// Draws <paramref name="track"/> onto the first video stream of input <paramref name="file"/>, which was seeked to
+    /// <paramref name="seek"/> seconds. Picture subtitles are overlaid from the same input, seeked with it. Text subtitles
+    /// go through libass (with any fonts the file carries), which reads the whole track on the source timeline, so the
+    /// frames are moved back to their source times while it draws.
     /// </summary>
-    static string BurnFilter(string input, SubtitleTrack track) => track.IsBitmap
-        ? $"[0:v:0][0:s:{track.Index}]overlay"
-        : $"[0:v:0]subtitles=filename={FilterValue(Path.GetFullPath(input).Replace('\\', '/'))}:si={track.Index}";
+    static string BurnFilter(string input, SubtitleTrack track, int file, double seek)
+    {
+        if (track.IsBitmap) return $"[{file}:v:0][{file}:s:{track.Index}]overlay";
+        var subtitles = $"subtitles=filename={FilterValue(Path.GetFullPath(input).Replace('\\', '/'))}:si={track.Index}";
+        if (seek <= 0) return $"[{file}:v:0]{subtitles}";
+        var offset = Text(seek);
+        return $"[{file}:v:0]setpts=PTS+{offset}/TB,{subtitles},setpts=PTS-{offset}/TB";
+    }
+
+    /// <summary>
+    /// Where an exact cut seeks to: a millisecond early, so a frame whose timestamp the container rounded down
+    /// (MKV keeps milliseconds) is not dropped as falling before the cut.
+    /// </summary>
+    static double Seek(double seconds) => Math.Max(0, seconds - 0.001);
 
     /// <summary>Escapes an option value for a filter graph: once for the option parser, then once for the graph parser.</summary>
     static string FilterValue(string value) => Escape(Escape(value, @"\':"), @"\'[],;");
@@ -217,25 +232,22 @@ static class ExportService
     }
 
     /// <summary>
-    /// One re-encode that trims each segment by frame number and joins them with the concat filter.
+    /// One re-encode that opens the source once per segment, seeked and cut to that segment as in a single cut, and joins
+    /// them with the concat filter. Each input decodes only its own segment, so progress moves from the start.
     /// Only the first video and audio tracks survive a filter graph, and the audio has to be re-encoded.
     /// </summary>
     static string[] BuildExactConcat(string input, string output, IReadOnlyList<Segment> segments, double fps, bool hasAudio, ExactExportOptions options)
     {
         var n = segments.Count;
+        var args = new List<string> { "-y", "-progress", "pipe:1", "-nostats" };
         var graph = new StringBuilder();
-        graph.Append(options.BurnSubtitles is { } burn ? BurnFilter(input, burn) + ",split=" : "[0:v:0]split=").Append(n);
-        for (var i = 0; i < n; i++) graph.Append("[vs").Append(i).Append(']');
-        graph.Append(';');
         for (var i = 0; i < n; i++)
-            graph.Append($"[vs{i}]trim=start_frame={segments[i].In}:end_frame={segments[i].Out},setpts=PTS-STARTPTS[v{i}];");
-        if (hasAudio)
         {
-            graph.Append("[0:a:0]asplit=").Append(n);
-            for (var i = 0; i < n; i++) graph.Append("[as").Append(i).Append(']');
-            graph.Append(';');
-            for (var i = 0; i < n; i++)
-                graph.Append($"[as{i}]atrim=start={Text(segments[i].In / fps)}:end={Text(segments[i].Out / fps)},asetpts=PTS-STARTPTS[a{i}];");
+            var seek = Seek(segments[i].In / fps);
+            args.AddRange(["-ss", Text(seek), "-t", Text((segments[i].Out - segments[i].In) / fps), "-i", input]);
+            graph.Append(options.BurnSubtitles is { } burn ? BurnFilter(input, burn, i, seek) + "," : $"[{i}:v:0]")
+                .Append($"setpts=PTS-STARTPTS[v{i}];");
+            if (hasAudio) graph.Append($"[{i}:a:0]asetpts=PTS-STARTPTS[a{i}];");
         }
 
         for (var i = 0; i < n; i++)
@@ -248,13 +260,7 @@ static class ExportService
         if (hasAudio) graph.Append("[a]");
 
         var (crf, preset) = ExactExportPresets.Encoder(options.Quality);
-        var args = new List<string>
-        {
-            "-y", "-progress", "pipe:1", "-nostats",
-            "-i", input,
-            "-filter_complex", graph.ToString(),
-            "-map", "[v]",
-        };
+        args.AddRange(["-filter_complex", graph.ToString(), "-map", "[v]"]);
         if (hasAudio) args.AddRange(["-map", "[a]"]);
         args.AddRange(["-c:v", "libx264", "-crf", crf.ToString(CultureInfo.InvariantCulture), "-preset", preset]);
         if (hasAudio) args.AddRange(["-c:a", "aac"]);
@@ -322,11 +328,15 @@ static class ExportService
         var exactPlan = Plan("in.mp4", "out.mp4", two, 30, hasAudio: true, exact: true);
         var graph = exactPlan.Steps[0].Arguments[Array.IndexOf(exactPlan.Steps[0].Arguments, "-filter_complex") + 1];
         Expect(exactPlan.Steps.Count == 1, "exact multi-cut is one run");
-        Expect(graph.Contains("trim=start_frame=300:end_frame=330") && graph.Contains("atrim=start=10:end=11"), "exact trims by frame and time");
+        var exactText = string.Join(" ", exactPlan.Steps[0].Arguments);
+        Expect(exactText.Contains("-ss 0 -t 2 -i in.mp4 -ss 9.999 -t 1 -i in.mp4"), "exact multi-cut seeks one input to each segment");
+        Expect(graph.StartsWith("[0:v:0]setpts=PTS-STARTPTS[v0];[0:a:0]asetpts=PTS-STARTPTS[a0];[1:v:0]"), "exact multi-cut takes each segment from its own input");
         Expect(graph.EndsWith("concat=n=2:v=1:a=1[v][a]"), "exact joins video and audio");
         Expect(Math.Abs(exactPlan.Steps[0].Seconds - 3) < 1e-9, "exact progress covers the kept length");
         var silent = Plan("in.mp4", "out.mp4", two, 30, hasAudio: false, exact: true).Steps[0].Arguments;
-        Expect(!silent.Contains("[a]") && !string.Join(" ", silent).Contains("atrim"), "no audio graph without audio");
+        Expect(!silent.Contains("[a]") && !string.Join(" ", silent).Contains("asetpts"), "no audio graph without audio");
+        var exactSingle = BuildArguments("in.mp4", "out.mp4", 1, 5, exact: true);
+        Expect(Array.IndexOf(exactSingle, "-ss") < Array.IndexOf(exactSingle, "-i") && exactSingle.Contains("0.999"), "exact cuts seek the input, a millisecond early");
 
         var fastPlan = Plan("in.mp4", Path.Combine("C:\\clips", "out.mp4"), two, 30, hasAudio: true, exact: false);
         Expect(fastPlan.Steps.Count == 3, "fast multi-cut copies each part, then joins");
@@ -344,14 +354,16 @@ static class ExportService
         var english = new SubtitleTrack(1, "subrip", "eng", null);
         var burned = BuildArguments(@"C:\clips\in.mkv", "out.mkv", 1, 5, exact: true, ExactExportOptions.Default with { BurnSubtitles = english });
         var burnGraph = burned[Array.IndexOf(burned, "-filter_complex") + 1];
-        Expect(burnGraph == @"[0:v:0]subtitles=filename=C\\:/clips/in.mkv:si=1[v]", "text subtitles go through the subtitles filter");
+        Expect(burnGraph == @"[0:v:0]setpts=PTS+0.999/TB,subtitles=filename=C\\:/clips/in.mkv:si=1,setpts=PTS-0.999/TB[v]", "text subtitles are drawn on the source timeline");
         Expect(string.Join(" ", burned).Contains("-map [v] -map 0:a?") && !string.Join(" ", burned).Contains("-map 0 "), "burning in leaves the subtitle streams out");
-        Expect(Array.IndexOf(burned, "-ss") > Array.IndexOf(burned, "-i"), "burned cuts still seek after the input");
+        Expect(Array.IndexOf(burned, "-ss") < Array.IndexOf(burned, "-i"), "burned cuts seek the input too");
+        var burnedAtStart = BuildArguments("in.mkv", "out.mkv", 0, 5, exact: true, ExactExportOptions.Default with { BurnSubtitles = english });
+        Expect(burnedAtStart[Array.IndexOf(burnedAtStart, "-filter_complex") + 1].StartsWith("[0:v:0]subtitles="), "a cut from the start needs no shift");
         var pgs = BuildArguments("in.mkv", "out.mkv", 1, 5, exact: true, ExactExportOptions.Default with { BurnSubtitles = new SubtitleTrack(0, "hdmv_pgs_subtitle", null, null) });
         Expect(pgs.Contains("[0:v:0][0:s:0]overlay[v]"), "picture subtitles are overlaid");
         var burnedConcat = Plan("in.mkv", "out.mkv", two, 30, hasAudio: true, exact: true, ExactExportOptions.Default with { BurnSubtitles = english }).Steps[0].Arguments;
         var concatGraph = burnedConcat[Array.IndexOf(burnedConcat, "-filter_complex") + 1];
-        Expect(concatGraph.StartsWith("[0:v:0]subtitles=") && concatGraph.Contains("si=1,split=2[vs0][vs1]"), "multi-cut burns in before splitting, on the source timeline");
+        Expect(concatGraph.StartsWith("[0:v:0]subtitles=") && concatGraph.Contains("[1:v:0]setpts=PTS+9.999/TB,subtitles=") && concatGraph.Contains("si=1,setpts=PTS-9.999/TB,setpts=PTS-STARTPTS[v1]"), "multi-cut burns each segment in on the source timeline");
         Expect(!BuildArguments("in.mkv", "out.mkv", 1, 5, exact: false).Contains("-filter_complex"), "fast copy never burns in");
 
         Expect(Remux.For("in.mkv", "out.MKV", []) is null, "the same container is not a conversion");

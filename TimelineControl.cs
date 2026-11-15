@@ -561,6 +561,28 @@ sealed class TimelineControl : Control
         ScrollTo(0, force: true);
     }
 
+    /// <summary>
+    /// Fills the timeline with the selection (the picked segments, or the active one), with a little room on each side.
+    /// When the view already shows it that way, shows the whole video instead, so a second press zooms back out.
+    /// </summary>
+    public void ZoomToSelection()
+    {
+        if (!HasMedia) return;
+        var range = PickedSegments is { Count: > 0 } picks ? new Segment(picks[0].In, picks.Max(s => s.Out)) : Active;
+        var margin = (range.Out - range.In) * 0.05;
+        var minimum = Math.Max(10, fps * 2);
+        var span = Math.Clamp(range.Out - range.In + 2 * margin, Math.Min(minimum, totalFrames), totalFrames);
+        var start = Math.Clamp((range.In + range.Out) / 2.0 - span / 2, 0, Math.Max(0, totalFrames - span));
+        if (Math.Abs(span - viewSpan) < 0.5 && Math.Abs(start - viewStart) < 0.5)
+        {
+            ZoomToFit();
+            return;
+        }
+
+        viewSpan = span;
+        ScrollTo(start, force: true);
+    }
+
     void ScrollTo(double start, bool force = false)
     {
         var clamped = Math.Clamp(start, 0, Math.Max(0, totalFrames - viewSpan));
@@ -1304,6 +1326,14 @@ sealed class TimelineControl : Control
         timeline.PickAll();
         timeline.SelectSegment(0);
         Expect(timeline.PickedSegments.Count == 0, "a plain click selects just one");
+        timeline.SelectSegment(1);
+        timeline.ZoomToSelection();
+        Expect(Math.Abs(timeline.viewStart - 285) < 0.01 && Math.Abs(timeline.viewSpan - 330) < 0.01, "fit fills the timeline with the selected segment");
+        timeline.ZoomToSelection();
+        Expect(!timeline.IsZoomed, "fit again shows the whole video");
+        timeline.PickRange(2);
+        timeline.ZoomToSelection();
+        Expect(Math.Abs(timeline.viewStart - 270) < 0.01 && Math.Abs(timeline.viewSpan - 660) < 0.01, "fit covers every picked segment");
 
         // Anchored thumbnails, on a 1000-pixel timeline where one tile is wider than 240 frames of the whole clip.
         using var film = new TimelineControl { ShowLane = false, Size = new Size(1000, 180) };

@@ -7,7 +7,8 @@ enum ExactQuality
     Small,
 }
 
-readonly record struct ExactExportOptions(ExactQuality Quality, bool CopyAudio)
+/// <summary><see cref="BurnSubtitles"/> is the source subtitle track drawn into the picture, or null for none.</summary>
+readonly record struct ExactExportOptions(ExactQuality Quality, bool CopyAudio, SubtitleTrack? BurnSubtitles = null)
 {
     public static ExactExportOptions Default { get; } = new(ExactQuality.Balanced, CopyAudio: false);
 }
@@ -38,4 +39,8 @@ static class ExactExportPresets
     public static string AudioHint(bool copyAudio) => copyAudio
         ? "Keeps the original audio track."
         : "Re-encodes audio to AAC.";
+
+    public static string SubtitleHint(SubtitleTrack? track) => track is { } burn
+        ? $"Burns {burn.Label} into the picture."
+        : "Subtitles are not burned in.";
 }

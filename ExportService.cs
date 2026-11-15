@@ -43,19 +43,46 @@ static class ExportService
         var options = exactOptions ?? ExactExportOptions.Default;
         var (crf, preset) = ExactExportPresets.Encoder(options.Quality);
         var audioCodec = options.CopyAudio ? "copy" : "aac";
+        // Burning in draws the track on the first video stream, so the subtitle streams are left out rather than shown twice.
+        string[] streams = options.BurnSubtitles is { } burn
+            ? ["-filter_complex", BurnFilter(input, burn) + "[v]", "-map", "[v]", "-map", "0:a?"]
+            : ["-map", "0"];
         return
         [
             "-y", "-progress", "pipe:1", "-nostats",
             "-i", input,
             "-ss", start,
             "-t", length,
-            "-map", "0",
+            .. streams,
             "-c:v", "libx264",
             "-crf", crf.ToString(CultureInfo.InvariantCulture),
             "-preset", preset,
             "-c:a", audioCodec,
             output,
         ];
+    }
+
+    /// <summary>
+    /// Draws <paramref name="track"/> onto the first video stream, which runs on the source timeline, before any trim.
+    /// Text subtitles go through libass (with any fonts the file carries); picture subtitles are overlaid.
+    /// </summary>
+    static string BurnFilter(string input, SubtitleTrack track) => track.IsBitmap
+        ? $"[0:v:0][0:s:{track.Index}]overlay"
+        : $"[0:v:0]subtitles=filename={FilterValue(Path.GetFullPath(input).Replace('\\', '/'))}:si={track.Index}";
+
+    /// <summary>Escapes an option value for a filter graph: once for the option parser, then once for the graph parser.</summary>
+    static string FilterValue(string value) => Escape(Escape(value, @"\':"), @"\'[],;");
+
+    static string Escape(string value, string special)
+    {
+        var escaped = new StringBuilder(value.Length);
+        foreach (var c in value)
+        {
+            if (special.Contains(c)) escaped.Append('\\');
+            escaped.Append(c);
+        }
+
+        return escaped.ToString();
     }
 
     /// <summary>
@@ -150,7 +177,7 @@ static class ExportService
     {
         var n = segments.Count;
         var graph = new StringBuilder();
-        graph.Append("[0:v:0]split=").Append(n);
+        graph.Append(options.BurnSubtitles is { } burn ? BurnFilter(input, burn) + ",split=" : "[0:v:0]split=").Append(n);
         for (var i = 0; i < n; i++) graph.Append("[vs").Append(i).Append(']');
         graph.Append(';');
         for (var i = 0; i < n; i++)
@@ -265,6 +292,20 @@ static class ExportService
         Expect(separate.Outputs.Select(Path.GetFileName).SequenceEqual(["show_01.mkv", "show_02.mkv"]), "separate files are numbered");
         Expect(separate.Steps.Count == 2 && separate.Steps[1].Arguments.SequenceEqual(BuildArguments("in.mp4", separate.Outputs[1], 10, 11, exact: true, new ExactExportOptions(ExactQuality.High, CopyAudio: true))), "each separate file uses the single-cut arguments");
         Expect(Path.GetFileName(SeparateOutputs("a.mp4", 120)[0]) == "a_001.mp4", "numbering widens past 99");
+
+        Expect(FilterValue(@"C:/a'b [x].mkv") == @"C\\:/a\\\'b \[x\].mkv", "filter values are escaped for both parsers");
+        var english = new SubtitleTrack(1, "subrip", "eng", null);
+        var burned = BuildArguments(@"C:\clips\in.mkv", "out.mkv", 1, 5, exact: true, ExactExportOptions.Default with { BurnSubtitles = english });
+        var burnGraph = burned[Array.IndexOf(burned, "-filter_complex") + 1];
+        Expect(burnGraph == @"[0:v:0]subtitles=filename=C\\:/clips/in.mkv:si=1[v]", "text subtitles go through the subtitles filter");
+        Expect(string.Join(" ", burned).Contains("-map [v] -map 0:a?") && !string.Join(" ", burned).Contains("-map 0 "), "burning in leaves the subtitle streams out");
+        Expect(Array.IndexOf(burned, "-ss") > Array.IndexOf(burned, "-i"), "burned cuts still seek after the input");
+        var pgs = BuildArguments("in.mkv", "out.mkv", 1, 5, exact: true, ExactExportOptions.Default with { BurnSubtitles = new SubtitleTrack(0, "hdmv_pgs_subtitle", null, null) });
+        Expect(pgs.Contains("[0:v:0][0:s:0]overlay[v]"), "picture subtitles are overlaid");
+        var burnedConcat = Plan("in.mkv", "out.mkv", two, 30, hasAudio: true, exact: true, ExactExportOptions.Default with { BurnSubtitles = english }).Steps[0].Arguments;
+        var concatGraph = burnedConcat[Array.IndexOf(burnedConcat, "-filter_complex") + 1];
+        Expect(concatGraph.StartsWith("[0:v:0]subtitles=") && concatGraph.Contains("si=1,split=2[vs0][vs1]"), "multi-cut burns in before splitting, on the source timeline");
+        Expect(!BuildArguments("in.mkv", "out.mkv", 1, 5, exact: false).Contains("-filter_complex"), "fast copy never burns in");
         return errors;
     }
 }

@@ -10,6 +10,7 @@ internal static class Program
             var errors = TimeMath.SelfCheck()
                 .Concat(FrameCache.SelfCheck())
                 .Concat(ExportService.SelfCheck())
+                .Concat(MediaProbe.SelfCheck())
                 .Concat(CutList.SelfCheck())
                 .Concat(AudioWaveform.SelfCheck())
                 .Concat(EditPlayer.SelfCheck())

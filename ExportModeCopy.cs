@@ -12,6 +12,9 @@ static class ExportModeCopy
         "Re-encodes so the cut matches the frames you chose. Slower, and the picture can change.";
 
     public const string CopyAudioTitle = "Copy audio";
+    public const string SubtitlesOffTitle = "Burn in subtitles";
+
+    public const string FastSubtitlesHint = "To burn in subtitles, choose Exact frames.";
 
     public const string FastMultiExplanation =
         "Copies each segment, then joins them without re-encoding. Every segment can start slightly earlier, on a keyframe.";
@@ -27,6 +30,7 @@ static class ExportModeCopy
             + " "
             + ExactExportPresets.Hint(options.Quality)
             + " "
-            + (segments > 1 ? ExactMultiAudio : ExactExportPresets.AudioHint(options.CopyAudio));
+            + (segments > 1 ? ExactMultiAudio : ExactExportPresets.AudioHint(options.CopyAudio))
+            + (options.BurnSubtitles is null ? "" : " " + ExactExportPresets.SubtitleHint(options.BurnSubtitles));
     }
 }

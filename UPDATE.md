@@ -1,5 +1,11 @@
 # Updates
 
+## 2026-11-15 (2026.11.15.01)
+
+- **Burn in subtitles:** when the video has subtitle tracks, Exact frames offers **Burn in subtitles** (a menu picks the track when there are several). Text subtitles are drawn with libass, using fonts carried in the file; Blu-ray, DVD and DVB picture subtitles are overlaid. It works for one clip, stitched segments and separate files, and the burned file leaves out the subtitle streams. The file info line shows how many subtitle tracks the video has.
+- The audio waveform is turned off for now: reading it demuxed the whole file, which on a large MKV meant reading every byte of it, even during an export. When it is turned back on, an export pauses the read and it picks up afterwards where it stopped.
+- `--check` now covers subtitle burn-in arguments, filter-path escaping and subtitle track probing.
+
 ## 2026-11-09 (2026.11.09.06)
 
 - The installer now installs to `C:\Program Files\WarmButter\VideoTrimmer` and removes the earlier `Program Files\VideoTrimmer` copy.

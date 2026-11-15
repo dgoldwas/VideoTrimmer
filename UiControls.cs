@@ -817,6 +817,7 @@ sealed class ExportBar : Panel
     public OptionCard QualityBalanced { get; }
     public OptionCard QualitySmall { get; }
     public OptionCard CopyAudio { get; }
+    public OptionCard Subtitles { get; }
     public FlatButton Export { get; }
     public FlatButton Cancel { get; }
     public Label Explanation { get; }
@@ -824,6 +825,8 @@ sealed class ExportBar : Panel
     bool exactMode;
     ExactQuality quality = ExactExportOptions.Default.Quality;
     bool copyAudio;
+    IReadOnlyList<SubtitleTrack> subtitleTracks = [];
+    SubtitleTrack? burn;
     int segments = 1;
     bool optionsEnabled = true;
 
@@ -836,6 +839,7 @@ sealed class ExportBar : Panel
         QualityBalanced = Option(ExactExportPresets.Title(ExactQuality.Balanced), ExactExportPresets.Hint(ExactQuality.Balanced), visible: false);
         QualitySmall = Option(ExactExportPresets.Title(ExactQuality.Small), ExactExportPresets.Hint(ExactQuality.Small), visible: false);
         CopyAudio = Option(ExportModeCopy.CopyAudioTitle, ExactExportPresets.AudioHint(true), visible: false);
+        Subtitles = Option(ExportModeCopy.SubtitlesOffTitle, ExactExportPresets.SubtitleHint(null), visible: false);
         Export = new FlatButton { Text = "Export…", Primary = true, AccessibleName = "Export", Enabled = false, BackColor = Theme.Surface };
         Cancel = new FlatButton { Text = "Cancel", AccessibleName = "Cancel export", Enabled = false, Visible = false, TextColor = Theme.OutPoint, BackColor = Theme.Surface };
         Explanation = new Label
@@ -845,12 +849,13 @@ sealed class ExportBar : Panel
             Font = Theme.Ui(9),
             TextAlign = ContentAlignment.TopLeft,
         };
-        Controls.AddRange([Fast, Exact, QualityHigh, QualityBalanced, QualitySmall, CopyAudio, Export, Cancel, Explanation]);
+        Controls.AddRange([Fast, Exact, QualityHigh, QualityBalanced, QualitySmall, CopyAudio, Subtitles, Export, Cancel, Explanation]);
 
         QualityHigh.Click += (_, _) => SetQuality(ExactQuality.High);
         QualityBalanced.Click += (_, _) => SetQuality(ExactQuality.Balanced);
         QualitySmall.Click += (_, _) => SetQuality(ExactQuality.Small);
         CopyAudio.Click += (_, _) => SetCopyAudio(!copyAudio);
+        Subtitles.Click += (_, _) => ChooseSubtitles();
 
         SetMode(false);
     }
@@ -863,7 +868,9 @@ sealed class ExportBar : Panel
         BackColor = Theme.Surface,
     };
 
-    public ExactExportOptions ExactOptions => new(quality, copyAudio);
+    public ExactExportOptions ExactOptions => new(quality, copyAudio, burn);
+
+    bool HasSubtitles => subtitleTracks.Count > 0;
 
     public event EventHandler? ExactOptionsChanged;
 
@@ -876,6 +883,7 @@ sealed class ExportBar : Panel
         QualityBalanced.Visible = exact;
         QualitySmall.Visible = exact;
         CopyAudio.Visible = exact;
+        Subtitles.Visible = exact && HasSubtitles;
         SyncExactSelection();
         RefreshExplanation();
         PerformLayout();
@@ -889,6 +897,16 @@ sealed class ExportBar : Panel
         QualitySmall.Enabled = enabled;
         // A multi-segment re-encode joins audio in a filter graph, so it cannot be copied.
         CopyAudio.Enabled = enabled && segments == 1;
+        Subtitles.Enabled = enabled;
+    }
+
+    /// <summary>A new video starts with nothing burned in. The option only appears when the video has subtitle tracks.</summary>
+    public void SetSubtitleTracks(IReadOnlyList<SubtitleTrack> tracks)
+    {
+        subtitleTracks = tracks;
+        burn = null;
+        SetMode(exactMode);
+        ExactOptionsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public void SetSegmentCount(int count)
@@ -903,7 +921,7 @@ sealed class ExportBar : Panel
     {
         var gap = LogicalToDeviceUnits(8);
         var height = LogicalToDeviceUnits(36) + gap;
-        if (exactMode) height += (LogicalToDeviceUnits(32) + gap) * 2;
+        if (exactMode) height += (LogicalToDeviceUnits(32) + gap) * (HasSubtitles ? 3 : 2);
         height += ExplanationHeight(width) + gap + LogicalToDeviceUnits(38);
         return height;
     }
@@ -932,6 +950,39 @@ sealed class ExportBar : Panel
         ExactOptionsChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    /// <summary>One track toggles on and off; several open a menu to pick which one.</summary>
+    void ChooseSubtitles()
+    {
+        if (!exactMode || !HasSubtitles) return;
+        if (subtitleTracks.Count == 1)
+        {
+            SetBurn(burn is null ? subtitleTracks[0] : null);
+            return;
+        }
+
+        var menu = new ContextMenuStrip { Renderer = new ToolStripProfessionalRenderer(new MenuColors()), ShowImageMargin = false, ShowCheckMargin = true, Font = Theme.Ui(9.5f) };
+        menu.Items.Add(MenuItem("Don't burn in", null));
+        foreach (var track in subtitleTracks) menu.Items.Add(MenuItem(track.Label, track));
+        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
+        menu.Show(Subtitles, new Point(0, Subtitles.Height));
+
+        ToolStripMenuItem MenuItem(string text, SubtitleTrack? track)
+        {
+            var item = new ToolStripMenuItem(text) { Checked = burn == track, ForeColor = Theme.Text };
+            item.Click += (_, _) => SetBurn(track);
+            return item;
+        }
+    }
+
+    void SetBurn(SubtitleTrack? value)
+    {
+        if (burn == value) return;
+        burn = value;
+        SyncExactSelection();
+        RefreshExplanation();
+        ExactOptionsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     void SyncExactSelection()
     {
         QualityHigh.Selected = quality == ExactQuality.High;
@@ -939,11 +990,15 @@ sealed class ExportBar : Panel
         QualitySmall.Selected = quality == ExactQuality.Small;
         CopyAudio.Selected = copyAudio;
         CopyAudio.AccessibleDescription = ExactExportPresets.AudioHint(copyAudio);
+        Subtitles.Selected = burn is not null;
+        Subtitles.Title = burn is { } track ? "Subtitles: " + track.Label : ExportModeCopy.SubtitlesOffTitle;
+        Subtitles.AccessibleDescription = ExactExportPresets.SubtitleHint(burn);
     }
 
     void RefreshExplanation()
     {
-        Explanation.Text = ExportModeCopy.Explanation(exactMode, ExactOptions, segments);
+        Explanation.Text = ExportModeCopy.Explanation(exactMode, ExactOptions, segments)
+            + (!exactMode && HasSubtitles ? " " + ExportModeCopy.FastSubtitlesHint : "");
         Explanation.AccessibleName = Explanation.Text;
         ExactOptionsChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -968,6 +1023,11 @@ sealed class ExportBar : Panel
             y += row + gap;
             CopyAudio.SetBounds(0, y, width, row);
             y += row + gap;
+            if (HasSubtitles)
+            {
+                Subtitles.SetBounds(0, y, width, row);
+                y += row + gap;
+            }
         }
 
         var explanation = ExplanationHeight(width);
@@ -985,6 +1045,21 @@ sealed class ExportBar : Panel
             Export.SetBounds(0, y, width, buttonHeight);
         }
     }
+}
+
+/// <summary>Dark colors for drop-down menus, matching the option cards.</summary>
+sealed class MenuColors : ProfessionalColorTable
+{
+    public override Color ToolStripDropDownBackground => Theme.Surface;
+    public override Color MenuBorder => Theme.Border;
+    public override Color MenuItemBorder => Theme.Accent;
+    public override Color MenuItemSelected => Theme.Mix(Theme.Surface, Theme.Accent, 0.28f);
+    public override Color CheckBackground => Theme.Mix(Theme.Surface, Theme.Accent, 0.28f);
+    public override Color CheckSelectedBackground => Theme.Mix(Theme.Surface, Theme.Accent, 0.4f);
+    public override Color CheckPressedBackground => Theme.Mix(Theme.Surface, Theme.Accent, 0.4f);
+    public override Color ImageMarginGradientBegin => Theme.Surface;
+    public override Color ImageMarginGradientMiddle => Theme.Surface;
+    public override Color ImageMarginGradientEnd => Theme.Surface;
 }
 
 /// <summary>Under the preview: jump to the previous cut, play the edit, jump to the next cut, the time readout, and zoom.</summary>

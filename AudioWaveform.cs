@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Globalization;
 
 namespace VideoTrimmer;
 
@@ -10,16 +11,21 @@ static class AudioWaveform
     public const double WindowSeconds = 0.02;
     const int WindowSamples = (int)(SampleRate * WindowSeconds);
 
-    /// <summary>Decodes the first audio track to mono 8 kHz and returns its RMS level (0–1) per 20 ms window.</summary>
-    public static async Task<float[]> ReadEnvelopeAsync(FfmpegRunner runner, string input, double duration, IProgress<double>? progress, CancellationToken token)
+    /// <summary>
+    /// Decodes the first audio track to mono 8 kHz and appends its RMS level (0–1) per 20 ms window to <paramref name="levels"/>.
+    /// A read that was canceled keeps the windows it finished, and calling again with the same list picks up after them.
+    /// </summary>
+    public static async Task ReadEnvelopeAsync(FfmpegRunner runner, string input, double duration, List<float> levels, IProgress<double>? progress, CancellationToken token)
     {
         if (runner.Ffmpeg is null) throw new InvalidOperationException("FFmpeg is not available.");
         var expected = Math.Max(1, (int)Math.Ceiling(duration / WindowSeconds));
-        var levels = new List<float>(expected + 16);
+        // Resuming seeks the input, which skips the part already read instead of reading the file from the start again.
+        string[] resume = levels.Count > 0 ? ["-ss", ResumeSeconds(levels.Count)] : [];
         // first_pts=0 pads a late-starting audio track so its windows line up with the video timeline.
         string[] args =
         [
             "-hide_banner", "-nostats", "-v", "error",
+            .. resume,
             "-i", input,
             "-map", "0:a:0", "-vn", "-sn", "-dn",
             "-af", $"aresample={SampleRate}:async=1:first_pts=0",
@@ -62,8 +68,9 @@ static class AudioWaveform
 
             if (count > 0) levels.Add((float)Math.Sqrt(sum / count));
         }, null, token).ConfigureAwait(false);
-        return levels.ToArray();
     }
+
+    static string ResumeSeconds(int windows) => (windows * WindowSeconds).ToString("0.###", CultureInfo.InvariantCulture);
 
         /// <summary>Maps an RMS level to 0–1 for drawing, on a 50 dB scale.</summary>
     public static float DisplayLevel(float rms)
@@ -78,6 +85,7 @@ static class AudioWaveform
         var errors = new List<string>();
         if (!(DisplayLevel(1) == 1 && DisplayLevel(0) == 0)) errors.Add("display level range");
         if (!(DisplayLevel(0.01f) > 0 && DisplayLevel(0.01f) < 1)) errors.Add("display level midrange");
+        if (ResumeSeconds(1500) != "30") errors.Add("resume after whole windows");
         return errors;
     }
 }

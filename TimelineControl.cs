@@ -73,6 +73,9 @@ sealed class TimelineControl : Control
     public bool IsDragging => drag != DragKind.None;
     public bool Locked { get; set; }
     public string Placeholder { get; set; } = "";
+    /// <summary>False hides the waveform lane, giving its height to the filmstrip.</summary>
+    public bool ShowLane { get; set; } = true;
+
     /// <summary>Text shown in the waveform lane while the audio is read, or why there is no waveform.</summary>
     public string LaneNote { get; set; } = "";
     public double Fps => fps;
@@ -804,7 +807,7 @@ sealed class TimelineControl : Control
 
     int LaneHeight()
     {
-        if (!HasMedia) return 0;
+        if (!HasMedia || !ShowLane) return 0;
         var track = TrackRect();
         return Math.Clamp(track.Height / 4, LogicalToDeviceUnits(18), LogicalToDeviceUnits(36));
     }

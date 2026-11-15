@@ -55,6 +55,13 @@ public sealed partial class MainForm : Form
     int loadGeneration;
     int previewGeneration;
     int waveGeneration;
+    /// <summary>
+    /// Off for now: reading the waveform demuxes the whole file, which on a large MKV means reading every byte of it.
+    /// </summary>
+    static readonly bool WaveformEnabled = false;
+    /// <summary>The waveform read so far, while it is still being read (or paused for an export); otherwise null.</summary>
+    List<float>? waveLevels;
+    Task waveRead = Task.CompletedTask;
 
     public MainForm(string? startupPath)
     {
@@ -100,6 +107,7 @@ public sealed partial class MainForm : Form
         previewHost.Controls.Add(preview);
         transport.Visible = false;
         timeline.Visible = false;
+        timeline.ShowLane = WaveformEnabled;
 
         segmentsCard.Controls.AddRange([segmentList, splitButton, newButton, resetButton]);
         selectedCard.Controls.Add(editor);
@@ -178,6 +186,7 @@ public sealed partial class MainForm : Form
         tips.SetToolTip(exportBar.QualityBalanced, ExactExportPresets.Hint(ExactQuality.Balanced));
         tips.SetToolTip(exportBar.QualitySmall, ExactExportPresets.Hint(ExactQuality.Small));
         tips.SetToolTip(exportBar.CopyAudio, "Keep the original audio instead of re-encoding to AAC.");
+        tips.SetToolTip(exportBar.Subtitles, "Draw a subtitle track into the picture, so it shows in every player.");
 
         WireDrop(this);
     }
@@ -540,13 +549,15 @@ public sealed partial class MainForm : Form
         timeline.SetClip(media.Duration, media.Fps, media.Frames);
         toolbar.FileName.Text = Path.GetFileName(path);
         tips.SetToolTip(toolbar.FileName, path);
-        toolbar.Meta.Text = string.Format(CultureInfo.CurrentCulture, "{0}   ·   {1:0.###} fps   ·   {2:N0} frames{3}",
-            TimeMath.Format(media.Frames, media.Fps), media.Fps, media.Frames, media.HasAudio ? "" : "   ·   no audio");
+        toolbar.Meta.Text = string.Format(CultureInfo.CurrentCulture, "{0}   ·   {1:0.###} fps   ·   {2:N0} frames{3}{4}",
+            TimeMath.Format(media.Frames, media.Fps), media.Fps, media.Frames, media.HasAudio ? "" : "   ·   no audio",
+            media.Subtitles.Count switch { 0 => "", 1 => "   ·   1 subtitle track", var n => $"   ·   {n} subtitle tracks" });
         toolbar.Visible = true;
         drop.Visible = false;
         foreach (Control control in new Control[] { previewHost, transport, timeline, segmentsCard, selectedCard, exportCard })
             control.Visible = true;
         exportBar.Export.Enabled = true;
+        exportBar.SetSubtitleTracks(media.Subtitles);
         LayoutChrome();
         WriteBoxes();
         UpdateReadouts();
@@ -950,8 +961,10 @@ public sealed partial class MainForm : Form
         ReplaceCts(ref exportCts);
         var token = exportCts.Token;
         var mode = exact ? "Encoding exact frames" : "Saving fast copy";
+        if (exact && exportBar.ExactOptions.BurnSubtitles is not null) mode += " with subtitles";
         if (segments.Count > 1) mode += $" of {segments.Count} segments";
         exporting = true;
+        PauseWaveform();
         timeline.Locked = true;
         exportBar.Export.Enabled = false;
         exportBar.Cancel.Enabled = true;
@@ -1031,6 +1044,7 @@ public sealed partial class MainForm : Form
                 statusBar.Progress.Visible = false;
                 statusBar.PerformLayout();
                 LayoutChrome();
+                ResumeWaveform();
             }
         }
     }
@@ -1132,11 +1146,43 @@ public sealed partial class MainForm : Form
     }
 
     /// <summary>Reads the audio once and draws it as the waveform under the filmstrip.</summary>
-    async void StartWaveform(string path, double length, bool audio)
+    void StartWaveform(string path, double length, bool audio)
     {
         ReplaceCts(ref waveCts);
+        ++waveGeneration;
+        waveLevels = WaveformEnabled && runner.Ffmpeg is not null && audio ? [] : null;
+        waveRead = ReadWaveform(path, length);
+    }
+
+    /// <summary>
+    /// Reading the waveform demuxes the whole file, so it stops while an export runs rather than compete for the disk.
+    /// What was read is kept; <see cref="ResumeWaveform"/> continues from there.
+    /// </summary>
+    void PauseWaveform()
+    {
+        if (waveLevels is null) return;
+        ++waveGeneration;
+        TryCancel(waveCts);
+        timeline.LaneNote = "Audio waveform paused while exporting";
+        timeline.Invalidate();
+    }
+
+    async void ResumeWaveform()
+    {
+        if (waveLevels is null || input is null) return;
+        var generation = waveGeneration;
+        // The paused read may still be finishing its last window; let it settle before reading on from its end.
+        try { await waveRead; } catch { }
+        if (generation != waveGeneration || IsDisposed || exporting) return;
+        ReplaceCts(ref waveCts);
+        waveRead = ReadWaveform(input, duration);
+    }
+
+    async Task ReadWaveform(string path, double length)
+    {
+        var levels = waveLevels;
+        if (levels is null) return;
         var generation = ++waveGeneration;
-        if (runner.Ffmpeg is null || !audio) return;
         var token = waveCts.Token;
         bool Current() => generation == waveGeneration && !IsDisposed;
         void Note(string text)
@@ -1150,18 +1196,20 @@ public sealed partial class MainForm : Form
         {
             Note("Reading audio…");
             var progress = new Progress<double>(p => Note($"Reading audio… {p:P0}"));
-            var envelope = await Task.Run(() => AudioWaveform.ReadEnvelopeAsync(runner, path, length, progress, token), token);
+            await Task.Run(() => AudioWaveform.ReadEnvelopeAsync(runner, path, length, levels, progress, token), token);
             if (!Current()) return;
+            waveLevels = null;
             // Progress reports are still queued on the UI thread; clear the note behind them.
             BeginInvoke(() => Note(""));
-            timeline.SetEnvelope(envelope);
+            timeline.SetEnvelope(levels.ToArray());
         }
         catch (OperationCanceledException)
         {
-            // A newer file replaced this one, or the app is closing.
+            // A newer file replaced this one, an export paused it, or the app is closing.
         }
         catch (Exception)
         {
+            if (Current()) waveLevels = null;
             Note("No waveform for this audio");
         }
     }

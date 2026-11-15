@@ -5,13 +5,14 @@ A small Windows desktop app for cutting a video down to the parts you want to ke
 ## Features
 
 - Open a video by browsing, drag and drop, or Explorer's **Open with** menu.
-- Scrub a filmstrip with an audio waveform beneath it. Drag the in and out handles, or type a timecode and a frame number together.
+- Scrub a filmstrip. Drag the in and out handles, or type a timecode and a frame number together.
 - **Zoom** the timeline to work frame by frame in long videos. When zoomed, an overview bar shows the whole clip; drag it to pan.
 - **Multi-cut:** keep several segments of one video. On export, choose whether to stitch them into one file or save each segment as its own numbered file (`name_01`, `name_02`, …). Split a segment at the playhead, start a new one, or delete one. Everything outside the kept segments is hatched out.
 - **Segments sidebar:** every segment is listed with its in, out, length and where it lands in the export. Click one to edit it in the selected-segment panel below the list.
 - **Play the edit:** play/pause plays the kept segments back to back with sound, the way the export will join them. ⏮ and ⏭ skip between cuts.
 - Export a fast stream copy, or re-encode for exact frames. Fast copy can start slightly early, on a keyframe.
 - Exact mode offers High / Balanced / Small quality presets and an optional copy-audio setting.
+- When the source has subtitle tracks, Exact mode can burn one into the picture. Text subtitles (SRT, ASS, mov_text, WebVTT) are drawn with libass, using any fonts the file carries; picture subtitles (Blu-ray PGS, DVD, DVB) are overlaid. The burned file leaves out the subtitle streams so they do not show twice.
 - Preserve mapped streams in fast-copy mode (`-map 0`), including audio and subtitles supported by the selected output container.
 - Installs to `C:\Program Files\WarmButter\VideoTrimmer` and updates itself from this repository's GitHub releases.
 
@@ -73,7 +74,7 @@ Fast copy avoids video re-encoding and is quick, but it can only start cleanly o
 
 With several segments, fast copy copies each segment beside the output (in a hidden `.<name>.parts` folder that is removed afterwards) and joins them with FFmpeg's concat demuxer, so every segment can start on an earlier keyframe. Exact frames trims each segment by frame number and joins them in one re-encode. That re-encode keeps only the first video and audio track, and it always encodes the audio to AAC.
 
-The waveform is read once per video from the first audio track, decoded to 8 kHz mono. Playing the edit decodes each kept segment with FFmpeg at preview size (up to 960 pixels wide) and its audio as 48 kHz PCM, played through [NAudio](https://github.com/naudio/NAudio) (MIT). The next segment is decoded ahead so joins play without a gap. Preview playback is for checking cuts; the export is what to judge picture quality by.
+The audio waveform under the filmstrip is turned off for now (`WaveformEnabled` in `MainForm.cs`), because reading it demuxes the whole file. When on, it is read once per video from the first audio track, decoded to 8 kHz mono. Playing the edit decodes each kept segment with FFmpeg at preview size (up to 960 pixels wide) and its audio as 48 kHz PCM, played through [NAudio](https://github.com/naudio/NAudio) (MIT). The next segment is decoded ahead so joins play without a gap. Preview playback is for checking cuts; the export is what to judge picture quality by.
 
 ## Repository contents
 

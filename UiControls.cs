@@ -11,7 +11,14 @@ abstract class GlassControl : Control
     protected const TextFormatFlags Line = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine
         | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis;
 
-    static readonly SolidBrush PanelBrush = new(Theme.PanelFill);
+    static SolidBrush PanelBrush = new(Theme.PanelFill);
+
+    static GlassControl() => Theme.Changed += () =>
+    {
+        var old = PanelBrush;
+        PanelBrush = new SolidBrush(Theme.PanelFill);
+        old.Dispose();
+    };
 
     protected GlassControl()
     {
@@ -254,7 +261,7 @@ sealed class GlassButton : GlassControl, IButtonControl
             var chipWidth = TextWidth(KeyHint!, HintFont) + S(10);
             var chipHeight = S(18);
             var chip = new Rectangle(x, (Height - chipHeight) / 2, chipWidth, chipHeight);
-            PaintUtil.Stroke(g, new RectangleF(chip.X + 0.5f, chip.Y + 0.5f, chip.Width - 1, chip.Height - 1), S(4), Color.FromArgb(40, 255, 255, 255));
+            PaintUtil.Stroke(g, new RectangleF(chip.X + 0.5f, chip.Y + 0.5f, chip.Width - 1, chip.Height - 1), S(4), Theme.Outline);
             TextRenderer.DrawText(g, KeyHint, HintFont, chip, Enabled ? Theme.Muted : Theme.Faint, Line | TextFormatFlags.HorizontalCenter);
         }
         else if (AlignLeft && Detail.Length > 0 && x < right)
@@ -334,17 +341,19 @@ sealed class GlassButton : GlassControl, IButtonControl
     }
 }
 
-/// <summary>Pick one of a few: a dark track with the chosen cell raised. Left and Right move the choice.</summary>
-sealed class Segmented : GlassControl
+/// <summary>
+/// Pick one of a few cells. Left and Right move the choice, and a screen reader sees one radio button per item.
+/// Subclasses lay out the cells and paint them.
+/// </summary>
+abstract class Picker : GlassControl
 {
-    string[] items = [];
-    int selected;
-    int hover = -1;
+    protected string[] items = [];
+    protected int selected;
+    protected int hover = -1;
 
-    public Segmented()
+    protected Picker()
     {
         SetStyle(ControlStyles.Selectable, true);
-        Font = Theme.Ui(9.5f);
         Cursor = Cursors.Hand;
         TabStop = true;
         AccessibleRole = AccessibleRole.Grouping;
@@ -376,34 +385,9 @@ sealed class Segmented : GlassControl
         }
     }
 
-    protected override AccessibleObject CreateAccessibilityInstance() => new SegmentedAccessibleObject(this);
+    protected override AccessibleObject CreateAccessibilityInstance() => new PickerAccessibleObject(this);
 
-    RectangleF Cell(int index)
-    {
-        var inset = S(3);
-        var width = (Width - inset * 2) / (float)Math.Max(1, items.Length);
-        return new RectangleF(inset + width * index, inset, width, Height - inset * 2);
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        PaintBase(g);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        var track = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
-        PaintUtil.Fill(g, track, S(10), Theme.Well);
-        PaintUtil.Stroke(g, track, S(10), Theme.WellBorder);
-        for (var i = 0; i < items.Length; i++)
-        {
-            var cell = Cell(i);
-            var on = i == selected;
-            if (on) PaintUtil.Fill(g, cell, S(7), Enabled ? Theme.Selected : Theme.Hairline);
-            var color = !Enabled ? Theme.Faint : on || i == hover ? Theme.Text : Theme.Muted;
-            TextRenderer.DrawText(g, items[i], on ? Theme.Ui(Font.SizeInPoints, FontStyle.Bold) : Font, Rectangle.Round(cell), color, Line | TextFormatFlags.HorizontalCenter);
-        }
-
-        if (Focused && ShowFocusCues) PaintUtil.FocusRing(g, ClientRectangle, S(10));
-    }
+    protected abstract RectangleF Cell(int index);
 
     int HitAt(Point point)
     {
@@ -447,12 +431,12 @@ sealed class Segmented : GlassControl
     }
 
     /// <summary>The control as a group with one radio button per item, so a screen reader can list and pick them.</summary>
-    sealed class SegmentedAccessibleObject : ControlAccessibleObject
+    sealed class PickerAccessibleObject : ControlAccessibleObject
     {
-        readonly Segmented owner;
+        readonly Picker owner;
         ItemAccessibleObject[] children = [];
 
-        public SegmentedAccessibleObject(Segmented owner) : base(owner) => this.owner = owner;
+        public PickerAccessibleObject(Picker owner) : base(owner) => this.owner = owner;
 
         public override AccessibleRole Role => AccessibleRole.Grouping;
         public override string? Name => owner.AccessibleName;
@@ -481,11 +465,11 @@ sealed class Segmented : GlassControl
 
     sealed class ItemAccessibleObject : AccessibleObject
     {
-        readonly SegmentedAccessibleObject parent;
-        readonly Segmented owner;
+        readonly PickerAccessibleObject parent;
+        readonly Picker owner;
         readonly int index;
 
-        public ItemAccessibleObject(SegmentedAccessibleObject parent, Segmented owner, int index)
+        public ItemAccessibleObject(PickerAccessibleObject parent, Picker owner, int index)
         {
             this.parent = parent;
             this.owner = owner;
@@ -538,6 +522,86 @@ sealed class Segmented : GlassControl
     }
 }
 
+/// <summary>Pick one of a few words: a dark track with the chosen cell raised.</summary>
+sealed class Segmented : Picker
+{
+    public Segmented() => Font = Theme.Ui(9.5f);
+
+    protected override RectangleF Cell(int index)
+    {
+        var inset = S(3);
+        var width = (Width - inset * 2) / (float)Math.Max(1, items.Length);
+        return new RectangleF(inset + width * index, inset, width, Height - inset * 2);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        PaintBase(g);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var track = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+        PaintUtil.Fill(g, track, S(10), Theme.Well);
+        PaintUtil.Stroke(g, track, S(10), Theme.WellBorder);
+        for (var i = 0; i < items.Length; i++)
+        {
+            var cell = Cell(i);
+            var on = i == selected;
+            if (on) PaintUtil.Fill(g, cell, S(7), Enabled ? Theme.Selected : Theme.Hairline);
+            var color = !Enabled ? Theme.Faint : on || i == hover ? Theme.Text : Theme.Muted;
+            TextRenderer.DrawText(g, items[i], on ? Theme.Ui(Font.SizeInPoints, FontStyle.Bold) : Font, Rectangle.Round(cell), color, Line | TextFormatFlags.HorizontalCenter);
+        }
+
+        if (Focused && ShowFocusCues) PaintUtil.FocusRing(g, ClientRectangle, S(10));
+    }
+}
+
+/// <summary>
+/// The accent colors as a row of round swatches, each drawn as the current theme shows it, with the chosen one ringed
+/// and named after the row.
+/// </summary>
+sealed class Swatches : Picker
+{
+    public Swatches()
+    {
+        Font = Theme.Ui(9.5f);
+        items = Theme.Tints.Select(tint => tint.Name).ToArray();
+    }
+
+    int Swatch => S(30);
+
+    protected override RectangleF Cell(int index) => new(index * (Swatch + S(8)), (Height - Swatch) / 2f, Swatch, Swatch);
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        PaintBase(g);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        for (var i = 0; i < items.Length; i++)
+        {
+            var cell = Cell(i);
+            var tint = Theme.Tints[i];
+            var color = Theme.IsDark ? tint.Dark : tint.LightFill;
+            using (var brush = new SolidBrush(color))
+                g.FillEllipse(brush, RectangleF.Inflate(cell, -S(5), -S(5)));
+            if (i == selected || i == hover)
+            {
+                using var ring = new Pen(i == selected ? Theme.Text : Theme.OutlineStrong, S(2));
+                g.DrawEllipse(ring, RectangleF.Inflate(cell, -S(1), -S(1)));
+            }
+
+            if (i == selected && Focused && ShowFocusCues)
+            {
+                using var focus = new Pen(Theme.Text, 1) { DashStyle = DashStyle.Dot };
+                g.DrawEllipse(focus, RectangleF.Inflate(cell, S(2), S(2)));
+            }
+        }
+
+        var left = (int)Cell(items.Length - 1).Right + S(12);
+        if (selected >= 0 && selected < items.Length)
+            TextRenderer.DrawText(g, items[selected], Font, new Rectangle(left, 0, Math.Max(1, Width - left), Height), Theme.Muted, Line | TextFormatFlags.Left);
+    }
+}
+
 /// <summary>A labelled on/off switch; the whole row is the target.</summary>
 sealed class ToggleSwitch : GlassControl
 {
@@ -575,7 +639,7 @@ sealed class ToggleSwitch : GlassControl
         TextRenderer.DrawText(g, Text, Font, new Rectangle(0, 0, Math.Max(1, (int)track.Left - S(8)), Height), Enabled ? Theme.Text : Theme.Faint, Line | TextFormatFlags.Left);
         var active = on && Enabled;
         PaintUtil.Fill(g, track, height / 2f, active ? Theme.Accent : Theme.Well);
-        if (!active) PaintUtil.Stroke(g, track, height / 2f, hover && Enabled ? Color.FromArgb(110, 255, 255, 255) : Color.FromArgb(64, 255, 255, 255));
+        if (!active) PaintUtil.Stroke(g, track, height / 2f, hover && Enabled ? Theme.OutlineStrong : Theme.Outline);
         var knob = S(12);
         var inset = (height - knob) / 2f;
         using var brush = new SolidBrush(active ? Theme.OnAccent : Enabled ? Theme.Muted : Theme.Faint);
@@ -675,7 +739,7 @@ sealed class DarkField : GlassControl
         g.SmoothingMode = SmoothingMode.AntiAlias;
         var rect = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
         PaintUtil.Fill(g, rect, S(8), Theme.Well);
-        PaintUtil.Stroke(g, rect, S(8), Box.Focused ? Theme.Accent : Theme.WellBorder);
+        PaintUtil.Stroke(g, rect, S(8), Box.Focused ? Theme.AccentInk : Theme.WellBorder);
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -748,7 +812,7 @@ sealed class TopBar : GlassControl
     public GlassButton Maximize { get; }
     public GlassButton Close { get; }
 
-    Color dot = Theme.Good;
+    StatusKind statusKind;
     Rectangle dotRect;
 
     public TopBar()
@@ -788,12 +852,7 @@ sealed class TopBar : GlassControl
             StatusKind.Busy or StatusKind.Good => Theme.Text,
             _ => Theme.Muted,
         };
-        dot = kind switch
-        {
-            StatusKind.Error => Theme.Caution,
-            StatusKind.Busy => Theme.Accent,
-            _ => Theme.Good,
-        };
+        statusKind = kind;
         PerformLayout();
         Invalidate();
     }
@@ -829,10 +888,16 @@ sealed class TopBar : GlassControl
         var g = e.Graphics;
         PaintBase(g);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        Icons.Draw(g, Icon.Split, new RectangleF(S(14), (ClientSize.Height - S(18)) / 2f, S(18), S(18)), Theme.Accent);
+        Icons.Draw(g, Icon.Split, new RectangleF(S(14), (ClientSize.Height - S(18)) / 2f, S(18), S(18)), Theme.AccentInk);
         if (Status.Text.Length > 0)
         {
-            using var brush = new SolidBrush(dot);
+            // Picked at paint time, so it follows a switch of theme or accent.
+            using var brush = new SolidBrush(statusKind switch
+            {
+                StatusKind.Error => Theme.Caution,
+                StatusKind.Busy => Theme.AccentInk,
+                _ => Theme.Good,
+            });
             g.FillEllipse(brush, dotRect);
         }
 
@@ -919,7 +984,7 @@ sealed class SegmentList : GlassControl
             var track = ClientSize.Height;
             var thumb = Math.Max(S(24), track * track / (MaxScroll + track));
             var top = (int)((track - thumb) * (scroll / (double)MaxScroll));
-            PaintUtil.Fill(g, new RectangleF(ClientSize.Width - S(3), top, S(3), thumb), S(2), Color.FromArgb(56, 255, 255, 255));
+            PaintUtil.Fill(g, new RectangleF(ClientSize.Width - S(3), top, S(3), thumb), S(2), Theme.Outline);
         }
     }
 
@@ -935,12 +1000,12 @@ sealed class SegmentList : GlassControl
         if (selected)
         {
             PaintUtil.Fill(g, rect, S(10), Theme.Alpha(Theme.Accent, 46));
-            PaintUtil.Stroke(g, rect, S(10), Theme.Accent);
+            PaintUtil.Stroke(g, rect, S(10), Theme.AccentInk);
         }
         else if (inPick)
         {
             PaintUtil.Fill(g, rect, S(10), Theme.Alpha(Theme.Accent, 24));
-            PaintUtil.Stroke(g, rect, S(10), Theme.Alpha(Theme.Accent, 140));
+            PaintUtil.Stroke(g, rect, S(10), Theme.Alpha(Theme.AccentInk, 140));
         }
         else if (hovered)
         {
@@ -951,7 +1016,7 @@ sealed class SegmentList : GlassControl
         var badgeSize = S(22);
         var badge = new Rectangle(row.Left + S(10), row.Top + (row.Height - badgeSize) / 2, badgeSize, badgeSize);
         var marked = selected || inPick;
-        using (var badgeBrush = new SolidBrush(marked ? Theme.Accent : Color.FromArgb(26, 255, 255, 255)))
+        using (var badgeBrush = new SolidBrush(marked ? Theme.Accent : Theme.Selected))
             g.FillEllipse(badgeBrush, badge);
         if (inPick)
             Icons.Draw(g, Icon.Check, RectangleF.Inflate(badge, -S(5), -S(5)), Theme.OnAccent, 3.2f);
@@ -968,7 +1033,7 @@ sealed class SegmentList : GlassControl
         var at = CutList.EditedFrame(normalized, segment.In);
         var info = new Rectangle(textLeft, row.Top + half, textRight - textLeft, half - S(5));
         TextRenderer.DrawText(g, $"{TimeMath.Format(segment.Length, fps)} long  ·  at {TimeMath.Format(at, fps)} in export", Theme.Ui(8.5f), info,
-            selected ? Color.FromArgb(214, 219, 228) : Theme.Muted, Line | TextFormatFlags.Left);
+            selected ? Theme.Text : Theme.Muted, Line | TextFormatFlags.Left);
 
         if (!close.IsEmpty && (hovered || selected))
         {
@@ -1626,11 +1691,14 @@ static class Menus
     {
         public override Color ToolStripDropDownBackground => Theme.Menu;
         public override Color MenuBorder => Theme.MenuBorder;
-        public override Color MenuItemBorder => Theme.Lift(Theme.Menu, 22);
-        public override Color MenuItemSelected => Theme.Lift(Theme.Menu, 22);
+        // The hovered item steps away from the menu's color: lighter on the dark theme, darker on the light one.
+        static Color Highlight => Theme.IsDark ? Theme.Lift(Theme.Menu, 22) : Theme.Darken(Theme.Menu, 16);
+
+        public override Color MenuItemBorder => Highlight;
+        public override Color MenuItemSelected => Highlight;
         public override Color CheckBackground => Theme.Menu;
-        public override Color CheckSelectedBackground => Theme.Lift(Theme.Menu, 22);
-        public override Color CheckPressedBackground => Theme.Lift(Theme.Menu, 22);
+        public override Color CheckSelectedBackground => Highlight;
+        public override Color CheckPressedBackground => Highlight;
         public override Color ImageMarginGradientBegin => Theme.Menu;
         public override Color ImageMarginGradientMiddle => Theme.Menu;
         public override Color ImageMarginGradientEnd => Theme.Menu;
@@ -1659,6 +1727,7 @@ sealed class ShortcutsDialog : Form
         ("Ctrl+wheel", "Zoom the timeline at the pointer"),
         ("Shift+click, Alt+click", "Set in or out on the timeline"),
         ("Ctrl+O", "Open a video"),
+        ("Ctrl+,", "Settings: theme and accent color"),
         ("F1", "Show this sheet"),
     ];
 
@@ -1682,7 +1751,7 @@ sealed class ShortcutsDialog : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        WindowChrome.Apply(this);
+        WindowChrome.Colors(this);
         ClientSize = new Size(S(520), S(24) * 2 + Rows.Length * S(30));
     }
 
@@ -1706,5 +1775,118 @@ sealed class ShortcutsDialog : Form
             y += S(30);
             if (y < ClientSize.Height - S(24)) g.DrawLine(line, S(28), y, ClientSize.Width - S(28), y);
         }
+    }
+}
+
+/// <summary>
+/// Settings: the light or dark theme and the accent color, as in WB Tunes. Each choice shows across the app at once;
+/// OK keeps it and Cancel puts the saved look back.
+/// </summary>
+sealed class SettingsDialog : Form
+{
+    readonly AppSettings settings;
+    readonly Segmented theme = new() { Items = ["Light", "Dark"], AccessibleName = "Theme" };
+    readonly Swatches accent = new() { AccessibleName = "Accent color" };
+    readonly GlassButton ok = new() { Text = "OK", Kind = ButtonKind.Primary, AccessibleName = "OK" };
+    readonly GlassButton cancel = new() { Text = "Cancel", AccessibleName = "Cancel" };
+    readonly bool savedDark;
+    readonly string savedAccent;
+    bool dark;
+    string accentName;
+
+    public SettingsDialog(AppSettings settings)
+    {
+        this.settings = settings;
+        Text = "Settings";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.CenterParent;
+        AutoScaleMode = AutoScaleMode.None;
+        BackColor = Theme.Base;
+        ForeColor = Theme.Text;
+        Font = Theme.Ui(9.5f);
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        savedDark = dark = settings.DarkTheme;
+        savedAccent = accentName = Theme.FindTint(settings.Accent).Name;
+        theme.Picked += index =>
+        {
+            dark = index == 1;
+            Preview();
+        };
+        accent.Picked += index =>
+        {
+            accentName = Theme.Tints[index].Name;
+            Preview();
+        };
+        ok.Click += (_, _) =>
+        {
+            settings.DarkTheme = dark;
+            settings.Accent = accentName;
+            DialogResult = DialogResult.OK;
+        };
+        cancel.Click += (_, _) => DialogResult = DialogResult.Cancel;
+        AcceptButton = ok;
+        CancelButton = cancel;
+        Controls.AddRange([theme, accent, cancel, ok]);
+        Theme.Changed += OnThemeChanged;
+        ShowChoices();
+    }
+
+    int S(int logical) => LogicalToDeviceUnits(logical);
+    int LabelWidth => S(96);
+    Rectangle ThemeRow => new(S(24), S(24), ClientSize.Width - S(48), S(36));
+    Rectangle AccentRow => new(S(24), ThemeRow.Bottom + S(16), ClientSize.Width - S(48), S(36));
+    Rectangle Hint => new(S(24) + LabelWidth, AccentRow.Bottom + S(10), ClientSize.Width - S(48) - LabelWidth, S(20));
+
+    void Preview()
+    {
+        Theme.Apply(dark, accentName);
+        ShowChoices();
+    }
+
+    void ShowChoices()
+    {
+        theme.SelectedIndex = dark ? 1 : 0;
+        accent.SelectedIndex = Array.FindIndex(Theme.Tints, tint => tint.Name == accentName);
+    }
+
+    void OnThemeChanged()
+    {
+        if (IsDisposed) return;
+        Theme.Recolor(this);
+        if (IsHandleCreated) WindowChrome.Colors(this);
+        Invalidate(true);
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        WindowChrome.Colors(this);
+        ClientSize = new Size(S(500), S(24) + S(36) + S(16) + S(36) + S(10) + S(20) + S(24) + S(36) + S(20));
+        theme.SetBounds(ThemeRow.Left + LabelWidth, ThemeRow.Top, S(180), ThemeRow.Height);
+        accent.SetBounds(AccentRow.Left + LabelWidth, AccentRow.Top, AccentRow.Width - LabelWidth, AccentRow.Height);
+        var buttonTop = ClientSize.Height - S(20) - S(36);
+        ok.SetBounds(ClientSize.Width - S(24) - S(96), buttonTop, S(96), S(36));
+        cancel.SetBounds(ok.Left - S(8) - S(96), buttonTop, S(96), S(36));
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        Theme.Changed -= OnThemeChanged;
+        if (DialogResult != DialogResult.OK) Theme.Apply(savedDark, savedAccent);
+        base.OnFormClosed(e);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        // The same tinted backdrop as the main window, so the controls' patches of it match the dialog around them.
+        Backdrop.Paint(g, this);
+        var flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.Left;
+        TextRenderer.DrawText(g, "Theme", Theme.Ui(9.5f), ThemeRow with { Width = LabelWidth }, Theme.Muted, flags);
+        TextRenderer.DrawText(g, "Accent", Theme.Ui(9.5f), AccentRow with { Width = LabelWidth }, Theme.Muted, flags);
+        TextRenderer.DrawText(g, "Changes show right away; Cancel puts back the saved look.", Theme.Ui(9), Hint, Theme.Faint, flags | TextFormatFlags.EndEllipsis);
     }
 }

@@ -17,7 +17,6 @@ static class Backdrop
     // A handful of pixels, so the tint is broad washes of color with none of the picture's detail.
     const int TintWidth = 8;
     const int TintHeight = 5;
-    const float TintStrength = 0.22f;
     // Muted, so a loud frame colors the window without competing with the video.
     const float TintSaturation = 0.55f;
 
@@ -80,7 +79,7 @@ static class Backdrop
             [r + TintSaturation, r, r, 0, 0],
             [gr, gr + TintSaturation, gr, 0, 0],
             [b, b, b + TintSaturation, 0, 0],
-            [0, 0, 0, TintStrength, 0],
+            [0, 0, 0, Theme.BackdropStrength, 0],
             [0, 0, 0, 0, 1],
         ]));
         g.DrawImage(tint, new Rectangle(Point.Empty, size), 0, 0, TintWidth, TintHeight, GraphicsUnit.Pixel, attributes);
@@ -386,18 +385,37 @@ static class WindowChrome
         };
     }
 
-    public static void Apply(Form form)
+    /// <summary>
+    /// For the main window, whose top bar is its caption: keeps one pixel of frame along the top, which brings back the
+    /// shadow and top border once the caption is gone, and has Windows ask for the frame's size again, now that the form
+    /// answers WM_NCCALCSIZE itself.
+    /// </summary>
+    public static void Merge(Form form)
     {
         try
         {
-            // One pixel of frame along the top keeps the window's shadow and top border once the caption is gone.
             var margins = new Margins { Top = 1 };
             DwmExtendFrameIntoClientArea(form.Handle, ref margins);
-            var on = 1;
-            DwmSetWindowAttribute(form.Handle, 20, ref on, sizeof(int)); // DWMWA_USE_IMMERSIVE_DARK_MODE
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            // Without DWM there is no shadow to keep.
+        }
+
+        Colors(form);
+        SetWindowPos(form.Handle, IntPtr.Zero, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020); // NOSIZE | NOMOVE | NOZORDER | NOACTIVATE | FRAMECHANGED
+    }
+
+    /// <summary>Colors what Windows draws of the frame (the border, and a dialog's caption) to match the theme. Call again when it changes.</summary>
+    public static void Colors(Form form)
+    {
+        try
+        {
+            var dark = Theme.IsDark ? 1 : 0;
+            DwmSetWindowAttribute(form.Handle, 20, ref dark, sizeof(int)); // DWMWA_USE_IMMERSIVE_DARK_MODE
             var caption = ColorTranslator.ToWin32(Theme.Base);
             DwmSetWindowAttribute(form.Handle, 35, ref caption, sizeof(int)); // DWMWA_CAPTION_COLOR
-            var border = ColorTranslator.ToWin32(Color.FromArgb(40, 44, 52));
+            var border = ColorTranslator.ToWin32(Theme.WindowBorder);
             DwmSetWindowAttribute(form.Handle, 34, ref border, sizeof(int)); // DWMWA_BORDER_COLOR
             var text = ColorTranslator.ToWin32(Theme.Muted);
             DwmSetWindowAttribute(form.Handle, 36, ref text, sizeof(int)); // DWMWA_TEXT_COLOR
@@ -406,8 +424,5 @@ static class WindowChrome
         {
             // Older Windows: the frame keeps the system color.
         }
-
-        // Have Windows ask for the frame's size again, now that the form answers WM_NCCALCSIZE itself.
-        SetWindowPos(form.Handle, IntPtr.Zero, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020); // NOSIZE | NOMOVE | NOZORDER | NOACTIVATE | FRAMECHANGED
     }
 }

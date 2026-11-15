@@ -15,6 +15,7 @@ A small Windows desktop app for cutting a video down to the parts you want to ke
 - Exact mode offers High / Balanced / Small quality presets and an optional copy-audio setting.
 - When the source has subtitle tracks, Exact mode can burn one into the picture. Text subtitles (SRT, ASS, mov_text, WebVTT) are drawn with libass, using any fonts the file carries; picture subtitles (Blu-ray PGS, DVD, DVB) are overlaid. The burned file leaves out the subtitle streams so they do not show twice.
 - Preserve mapped streams in fast-copy mode (`-map 0`), including audio and subtitles supported by the selected output container.
+- **Settings** (**⋯** menu or `Ctrl+,`): a light or dark theme and one of seven accent colors, the same set as WB Tunes. Choices show at once; **Cancel** puts the saved look back. They are kept in `%LOCALAPPDATA%\VideoTrimmer\settings.json`.
 - Installs to `C:\Program Files\WarmButter\VideoTrimmer` and updates itself from this repository's GitHub releases.
 
 ## Controls
@@ -67,7 +68,7 @@ The project's `<Version>` (YYYY.MM.DD.##) is the only place the version is set. 
 .\build-installer.ps1 -Release   # ...and publish it as GitHub release v<version>, which installed copies pick up
 ```
 
-`VideoTrimmer.exe --render <folder>` makes a short test clip and saves pictures of the window in its main states (empty, loaded, trimmed, Exact mode, zoomed, exporting), the ⋯ menu and the shortcuts sheet, for checking the UI without clicking through it.
+`VideoTrimmer.exe --render <folder>` makes a short test clip and saves pictures of the window in its main states (empty, loaded, trimmed, Exact mode, zoomed, exporting), the ⋯ menu, the shortcuts sheet and Settings, then the light theme, for checking the UI without clicking through it.
 
 `build.ps1` runs the `--check` self-test on the published exe and bundles a pinned, checksum-verified GPL FFmpeg build from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) into `tools\`. Exact-frame export needs libx264, which LGPL builds leave out. The installer needs [Inno Setup 6](https://jrsoftware.org/isinfo.php). The icon comes from `assets\make-icon.ps1`.
 

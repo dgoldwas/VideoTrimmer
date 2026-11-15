@@ -18,6 +18,8 @@ internal static class Program
                 .Concat(EditPlayer.SelfCheck())
                 .Concat(TimelineControl.SelfCheck())
                 .Concat(UpdateService.SelfCheck())
+                .Concat(Theme.SelfCheck())
+                .Concat(AppSettings.SelfCheck())
                 .ToList();
             var path = Path.Combine(Path.GetTempPath(), "vt-check.txt");
             File.WriteAllLines(path, errors.Count == 0 ? ["ok"] : errors);
@@ -29,6 +31,8 @@ internal static class Program
             Environment.Exit(MainForm.Render(Path.GetFullPath(folder)));
 
         var startup = args.Length > 0 && File.Exists(args[0]) ? args[0] : null;
-        Application.Run(new MainForm(startup));
+        var settings = AppSettings.Load();
+        Theme.Apply(settings.DarkTheme, settings.Accent);
+        Application.Run(new MainForm(startup, settings: settings));
     }
 }

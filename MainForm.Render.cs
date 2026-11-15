@@ -3,7 +3,7 @@ namespace VideoTrimmer;
 /// <summary>
 /// <c>--render &lt;folder&gt;</c>: makes a short test clip, opens it, and saves pictures of the window in its main states,
 /// so the UI can be looked at the same way every time without sending keys or clicks to the desktop. The pictures are
-/// taken at the display scale of the monitor the window opens on.
+/// taken at the display scale of the monitor the window opens on, in the dark theme and then the light one.
 /// </summary>
 public sealed partial class MainForm
 {
@@ -93,6 +93,26 @@ public sealed partial class MainForm
         shortcuts.Show(this);
         await Task.Delay(300);
         Save(shortcuts, folder, "7-shortcuts");
+        shortcuts.Close();
+
+        // Settings, then the light theme with another accent. Nothing here is saved.
+        using (var dark = new SettingsDialog(new AppSettings()) { StartPosition = FormStartPosition.Manual, Location = Location })
+        {
+            dark.Show(this);
+            await Task.Delay(300);
+            Save(dark, folder, "8-settings");
+            dark.Close();
+        }
+
+        Theme.Apply(dark: false, "Sky");
+        await Task.Delay(300);
+        Save(this, folder, "9-light");
+        using var light = new SettingsDialog(new AppSettings { DarkTheme = false, Accent = "Sky" }) { StartPosition = FormStartPosition.Manual, Location = Location };
+        light.Show(this);
+        await Task.Delay(300);
+        Save(light, folder, "9-light-settings");
+        light.Close();
+        Save(Popup(MoreMenu()), folder, "9-light-menu", close: true);
     }
 
     ContextMenuStrip Popup(ContextMenuStrip menu)

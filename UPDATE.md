@@ -1,5 +1,12 @@
 # Updates
 
+## 2026-11-15 (2026.11.15.04)
+
+- **Settings** (**⋯** menu or `Ctrl+,`): choose a **light or dark theme** and one of seven **accent colors** (Butter, Graphite, Sky, Mint, Rose, Violet, Coral), the same set as WB Tunes. Each choice shows across the app at once; **OK** keeps it and **Cancel** puts the saved look back. Settings are kept in `%LOCALAPPDATA%\VideoTrimmer\settings.json`.
+- The light theme draws thin accent lines in a deeper shade so they show on the pale window. Labels on the accent switch between near-black and white, whichever reads better. What sits on the video itself (cut shading, the IN/OUT tags, the playhead) looks the same in both themes.
+- The default accent, Butter, is WB Tunes' butter yellow, a touch lighter than the earlier amber.
+- `--check` now confirms every accent's label contrast (at least 4.5:1) in both themes and covers reading and writing the settings file. `--render` also pictures the Settings dialog and the light theme.
+
 ## 2026-11-15 (2026.11.15.03)
 
 - **One title bar:** the window's own caption is gone; the top bar is the title bar, with minimize, maximize and close at its right. Drag it (or the file name and status) to move the window, double-click it to maximize, and hover maximize for Windows 11's snap layouts. Resizing, snapping and the shadow are still Windows' own.

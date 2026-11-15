@@ -16,6 +16,7 @@ public sealed partial class MainForm : Form
     readonly System.Windows.Forms.Timer filmTimer = new() { Interval = 200 };
     readonly ToolTip tips = new() { ShowAlways = true };
     readonly string? startupPath;
+    readonly AppSettings settings;
 
     readonly TopBar topBar = new();
     readonly DropPrompt drop = new();
@@ -74,9 +75,12 @@ public sealed partial class MainForm : Form
     Task waveRead = Task.CompletedTask;
 
     /// <param name="checkForUpdates">Off for <c>--render</c>, which must not take the last update's result or go online.</param>
-    public MainForm(string? startupPath, bool checkForUpdates = true)
+    /// <param name="settings">The saved settings, already applied to <see cref="Theme"/>.</param>
+    internal MainForm(string? startupPath, bool checkForUpdates = true, AppSettings? settings = null)
     {
         this.startupPath = startupPath;
+        this.settings = settings ?? new AppSettings();
+        Theme.Changed += OnThemeChanged;
         stills = new StillCapture(runner);
         filmstrip = new FilmstripService(runner, stills);
         player = new EditPlayer(runner, preview);
@@ -212,7 +216,7 @@ public sealed partial class MainForm : Form
         base.OnHandleCreated(e);
         if (sized) return;
         sized = true;
-        WindowChrome.Apply(this);
+        WindowChrome.Merge(this);
         MinimumSize = new Size(S(980), S(700));
         Size = new Size(S(1320), S(860));
         CenterToScreen();
@@ -296,6 +300,7 @@ public sealed partial class MainForm : Form
         if (disposing && !disposed)
         {
             disposed = true;
+            Theme.Changed -= OnThemeChanged;
             CancelAndDispose(loadCts);
             CancelAndDispose(previewCts);
             CancelAndDispose(filmCts);
@@ -343,6 +348,12 @@ public sealed partial class MainForm : Form
         if (keyData == Keys.F1)
         {
             ShowShortcuts();
+            return true;
+        }
+
+        if (keyData == (Keys.Control | Keys.Oemcomma))
+        {
+            ShowSettings();
             return true;
         }
 
@@ -1423,6 +1434,27 @@ public sealed partial class MainForm : Form
     {
         using var dialog = new ShortcutsDialog();
         dialog.ShowDialog(this);
+    }
+
+    void ShowSettings()
+    {
+        using var dialog = new SettingsDialog(settings);
+        if (dialog.ShowDialog(this) == DialogResult.OK && !settings.Save())
+            SetStatus("The settings couldn't be saved, so they last only until VideoTrimmer closes.", StatusKind.Error);
+    }
+
+    /// <summary>
+    /// Follows a switch of theme or accent: the controls' own colors, the frame Windows draws, and the backdrop, which is
+    /// built on the theme's base. Cached brushes rebuild themselves.
+    /// </summary>
+    void OnThemeChanged()
+    {
+        if (IsDisposed) return;
+        Theme.Recolor(this);
+        if (IsHandleCreated) WindowChrome.Colors(this);
+        backdropSize = ClientSize;
+        Backdrop.Resize(ClientSize);
+        Invalidate(true);
     }
 
     int S(int logical) => LogicalToDeviceUnits(logical);

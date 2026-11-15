@@ -33,25 +33,48 @@ sealed class TimelineControl : Control
     enum DragKind { None, Playhead, InHandle, OutHandle, Span, Overview }
     enum HitKind { None, InHandle, OutHandle, Selection, Film, Overview }
 
-    static readonly SolidBrush FilmBrush = new(Theme.Well);
-    static readonly SolidBrush LaneBrush = new(Theme.Darken(Theme.Well, 4));
+    // Brushes and pens in the theme's colors, rebuilt when it changes (see Repaint). The rest draw on the video and keep one look.
+    static SolidBrush FilmBrush = null!;
+    static SolidBrush LaneBrush = null!;
+    static SolidBrush AccentBrush = null!;
+    static SolidBrush GripBrush = null!;
+    static SolidBrush WaveBrush = null!;
+    static Pen LaneLinePen = null!;
+    static Pen SelectionPen = null!;
+    static Pen PickedPen = null!;
     // Cut regions are dimmed and hatched in neutral tones: red is kept for caution, not for "removed".
     static readonly SolidBrush DimBrush = new(Color.FromArgb(196, 8, 9, 12));
     static readonly HatchBrush CutHatch = new(HatchStyle.WideDownwardDiagonal, Color.FromArgb(26, 255, 255, 255), Color.Transparent);
     static readonly SolidBrush TagBackgroundBrush = new(Color.FromArgb(214, 13, 15, 19));
     static readonly SolidBrush PlayheadBrush = new(Color.White);
-    static readonly SolidBrush AccentBrush = new(Theme.Accent);
-    static readonly SolidBrush GripBrush = new(Theme.OnAccent);
-    static readonly SolidBrush WaveBrush = new(Theme.Muted);
     static readonly SolidBrush OverviewBrush = new(Color.FromArgb(90, 0, 0, 0));
     static readonly SolidBrush ViewportBrush = new(Color.FromArgb(46, 255, 255, 255));
     static readonly SolidBrush ViewportGripBrush = new(Color.FromArgb(216, 255, 255, 255));
     static readonly Pen ViewportPen = new(Color.FromArgb(204, 255, 255, 255), 1);
-    static readonly Pen LaneLinePen = new(Theme.WellBorder);
-    static readonly Pen SelectionPen = new(Theme.Accent, 2);
     static readonly Pen KeptPen = new(Color.FromArgb(96, 255, 255, 255), 1);
-    static readonly Pen PickedPen = new(Theme.Accent, 2);
+    // Text on the dark tags over the thumbnails, which look the same in either theme.
+    static readonly Color OnVideoText = Color.FromArgb(242, 244, 248);
     static readonly Pen PlayheadPen = new(Color.White, 2);
+
+    static TimelineControl()
+    {
+        Repaint();
+        Theme.Changed += Repaint;
+    }
+
+    static void Repaint()
+    {
+        IDisposable?[] old = [FilmBrush, LaneBrush, AccentBrush, GripBrush, WaveBrush, LaneLinePen, SelectionPen, PickedPen];
+        FilmBrush = new SolidBrush(Theme.Well);
+        LaneBrush = new SolidBrush(Theme.IsDark ? Theme.Darken(Theme.Well, 4) : Theme.Darken(Theme.Well, 8));
+        AccentBrush = new SolidBrush(Theme.Accent);
+        GripBrush = new SolidBrush(Theme.OnAccent);
+        WaveBrush = new SolidBrush(Theme.Muted);
+        LaneLinePen = new Pen(Theme.WellBorder);
+        SelectionPen = new Pen(Theme.Accent, 2);
+        PickedPen = new Pen(Theme.Accent, 2);
+        foreach (var item in old) item?.Dispose();
+    }
 
     Bitmap?[]? strip;
     long stripStart;
@@ -1115,7 +1138,7 @@ sealed class TimelineControl : Control
         var height = Math.Min(lane.Height - 2, size.Height + LogicalToDeviceUnits(2));
         var note = new Rectangle(lane.Right - width - LogicalToDeviceUnits(16), lane.Top + (lane.Height - height) / 2, width, height);
         graphics.FillRectangle(TagBackgroundBrush, note);
-        TextRenderer.DrawText(graphics, LaneNote, font, note, Theme.Text,
+        TextRenderer.DrawText(graphics, LaneNote, font, note, OnVideoText,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
     }
 
@@ -1157,7 +1180,7 @@ sealed class TimelineControl : Control
         using var path = PaintUtil.Rounded(rect, height / 2);
         using var brush = new SolidBrush(selected ? Theme.Accent : Color.FromArgb(214, 13, 15, 19));
         graphics.FillPath(brush, path);
-        TextRenderer.DrawText(graphics, text, font, rect, selected ? Theme.OnAccent : Theme.Text,
+        TextRenderer.DrawText(graphics, text, font, rect, selected ? Theme.OnAccent : OnVideoText,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
 
@@ -1206,8 +1229,8 @@ sealed class TimelineControl : Control
         outLeft = ClampTag(outLeft, outSize.Width, film);
         if (!TagsOverlap(inLeft, inSize.Width, outLeft, outSize.Width, gap))
         {
-            DrawTagAt(graphics, inText, inLeft, top, inSize, Theme.Text);
-            DrawTagAt(graphics, outText, outLeft, top, outSize, Theme.Text);
+            DrawTagAt(graphics, inText, inLeft, top, inSize, OnVideoText);
+            DrawTagAt(graphics, outText, outLeft, top, outSize, OnVideoText);
             return;
         }
 
@@ -1217,8 +1240,8 @@ sealed class TimelineControl : Control
         var outTop = top + inSize.Height + gap;
         if (outTop + outSize.Height > film.Bottom - 4)
             outTop = Math.Max(film.Top + 2, film.Bottom - outSize.Height - 4);
-        DrawTagAt(graphics, inText, inLeft, top, inSize, Theme.Text);
-        DrawTagAt(graphics, outText, outLeft, outTop, outSize, Theme.Text);
+        DrawTagAt(graphics, inText, inLeft, top, inSize, OnVideoText);
+        DrawTagAt(graphics, outText, outLeft, outTop, outSize, OnVideoText);
     }
 
     Size TagSize(string text)

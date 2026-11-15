@@ -54,6 +54,7 @@ public sealed partial class MainForm
         var menu = Menus.Create();
         menu.Items.Add(Menus.Item("Open video…", false, Browse, "Ctrl+O", enabled: !exporting));
         menu.Items.Add(Menus.Item("Keyboard shortcuts", false, ShowShortcuts, "F1"));
+        menu.Items.Add(Menus.Item("Settings…", false, ShowSettings, "Ctrl+,"));
         menu.Items.Add(Menus.Separator());
         menu.Items.Add(Menus.Item(updateLabel, false, OnUpdateClick, enabled: !updateBusy));
         menu.Items.Add(Menus.Item("About VideoTrimmer", false, ShowAbout, UpdateService.CurrentVersion));

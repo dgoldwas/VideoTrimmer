@@ -55,6 +55,7 @@ public sealed partial class MainForm : Form
     bool exact;
     bool hasAudio;
     VideoColor sourceColor;
+    bool previewUseLibplacebo;
     bool exporting;
     bool syncing;
     bool sized;
@@ -579,11 +580,15 @@ public sealed partial class MainForm : Form
         ReplaceCts(ref loadCts);
         var token = loadCts.Token;
         var generation = ++loadGeneration;
+        drop.Enabled = false;
         SetStatus("Reading metadata…", StatusKind.Busy);
         try
         {
             var media = await MediaProbe.ProbeAsync(runner, path, token);
+            var useLibplacebo = media.Color.DolbyProfile > 0 && await HdrExport.SupportsPlaceboAsync(runner, token);
+            _ = HdrExport.Filter(media.Color, useLibplacebo);
             if (generation != loadGeneration || IsDisposed) return;
+            previewUseLibplacebo = useLibplacebo;
             ApplyMedia(path, media);
             if (project is not null) ApplyProject(project);
         }
@@ -596,6 +601,10 @@ public sealed partial class MainForm : Form
             if (generation != loadGeneration || IsDisposed) return;
             SetStatus("Could not read video: " + ex.Message, StatusKind.Error);
             MessageBox.Show(this, "Video metadata could not be read.\n\n" + ex.Message, "VideoTrimmer", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            if (generation == loadGeneration && !IsDisposed) drop.Enabled = true;
         }
     }
 
@@ -786,7 +795,7 @@ public sealed partial class MainForm : Form
     void ChooseExact(bool value)
     {
         if (exporting) return;
-        exact = value || (timeline.HasMedia && sourceColor.IsHdr);
+        exact = value || (timeline.HasMedia && sourceColor.IsHdr) || exportBar.ExactOptions.Size != ExportSize.Source;
         exportBar.SetMode(exact);
         LayoutChrome();
     }
@@ -813,7 +822,7 @@ public sealed partial class MainForm : Form
         previewGeneration++;
         var width = Math.Clamp(preview.ClientSize.Width, 320, 960) & ~3;
         var height = Math.Max(2, (int)Math.Round(width / aspect / 2) * 2);
-        if (player.Play(input, timeline.ExportSegments, timeline.Fps, frame, new Size(width, height), hasAudio))
+        if (player.Play(input, timeline.ExportSegments, timeline.Fps, frame, new Size(width, height), hasAudio, sourceColor, previewUseLibplacebo))
         {
             transport.SetPlaying(true);
             SetStatus("Playing the edit. Space pauses; , and . jump between cuts.", StatusKind.Info);
@@ -911,7 +920,7 @@ public sealed partial class MainForm : Form
         Bitmap? bitmap = null;
         try
         {
-            bitmap = await stills.CaptureAsync(input, duration, timeline.SeekTime(frame), accurate, "scale=" + width + ":-2", accurate ? 2 : 3, token);
+            bitmap = await stills.CaptureAsync(input, duration, timeline.SeekTime(frame), accurate, "scale=" + width + ":-2", accurate ? 2 : 3, token, sourceColor, previewUseLibplacebo);
         }
         catch (OperationCanceledException)
         {
@@ -1008,7 +1017,7 @@ public sealed partial class MainForm : Form
                 if (exporting || player.IsPlaying) return;
                 SetStatus(any ? ReadyHint : failure, any ? StatusKind.Info : StatusKind.Error);
             },
-            isExporting: () => exporting);
+            isExporting: () => exporting, sourceColor, previewUseLibplacebo);
     }
 
     /// <summary>Asks for the selected segment's own thumbnails once the edit or the view has settled.</summary>
@@ -1054,8 +1063,8 @@ public sealed partial class MainForm : Form
                 {
                     var time = timeline.SeekTime(request.FrameAt(i));
                     // The probed length can run a little past the last real frame; step back rather than leave a hole.
-                    slots[i] = await stills.CaptureAsync(path, duration, time, accurate: false, "scale=-2:" + height, 5, token)
-                        ?? await stills.CaptureAsync(path, duration, Math.Max(0, time - 0.5), accurate: false, "scale=-2:" + height, 5, token);
+                    slots[i] = await stills.CaptureAsync(path, duration, time, accurate: false, "scale=-2:" + height, 5, token, sourceColor, previewUseLibplacebo)
+                        ?? await stills.CaptureAsync(path, duration, Math.Max(0, time - 0.5), accurate: false, "scale=-2:" + height, 5, token, sourceColor, previewUseLibplacebo);
                 }
                 finally
                 {
@@ -1222,7 +1231,7 @@ public sealed partial class MainForm : Form
                 });
                 SetStatus(phase + "…", StatusKind.Busy);
                 activeOutput = outputs.Contains(step.Arguments[^1]) ? step.Arguments[^1] : null;
-                await runner.RunAsync(runner.Ffmpeg, step.Arguments, token, progress);
+                await runner.RunAsync(runner.Ffmpeg, step.Arguments, token, progress, timeline.Fps);
                 activeOutput = null;
                 done += step.Weight;
             }

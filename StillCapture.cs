@@ -16,10 +16,10 @@ sealed class StillCapture
     /// <summary>How far before the frame an accurate still jumps with the quick seek, then decodes forward from.</summary>
     const double AccurateLeadIn = 2;
 
-    public async Task<Bitmap?> CaptureAsync(string input, double duration, double seconds, bool accurate, string filter, int quality, CancellationToken token)
+    public async Task<Bitmap?> CaptureAsync(string input, double duration, double seconds, bool accurate, string filter, int quality, CancellationToken token, VideoColor color = default, bool useLibplacebo = false)
     {
         if (runner.Ffmpeg is null) return null;
-        var args = Arguments(input, Math.Clamp(seconds, 0, Math.Max(0, duration - 0.001)), accurate, filter, quality);
+        var args = Arguments(input, Math.Clamp(seconds, 0, Math.Max(0, duration - 0.001)), accurate, filter, quality, color, useLibplacebo);
         try
         {
             var bytes = await runner.RunBinaryAsync(runner.Ffmpeg, args, token).ConfigureAwait(false);
@@ -41,7 +41,7 @@ sealed class StillCapture
     /// An accurate one seeks in two steps: before -i to a little short of the time, then after -i the rest of the way, which
     /// stays frame-exact but decodes only the lead-in instead of everything from the start of the file.
     /// </summary>
-    static string[] Arguments(string input, double seconds, bool accurate, string filter, int quality)
+    internal static string[] Arguments(string input, double seconds, bool accurate, string filter, int quality, VideoColor color = default, bool useLibplacebo = false)
     {
         var jump = accurate ? Math.Max(0, seconds - AccurateLeadIn) : seconds;
         return
@@ -51,7 +51,8 @@ sealed class StillCapture
             "-i", input,
             .. accurate ? ["-ss", Text(seconds - jump)] : Array.Empty<string>(),
             "-frames:v", "1",
-            "-vf", filter,
+            "-map", "0:V:0", "-an", "-sn", "-dn",
+            "-vf", HdrExport.PreviewFilter(filter, color, useLibplacebo),
             "-q:v", quality.ToString(CultureInfo.InvariantCulture),
             "-f", "image2pipe",
             "-vcodec", "mjpeg",
@@ -75,6 +76,9 @@ sealed class StillCapture
         Expect(early.Contains("-ss 0 -i in.mkv -ss 0.75 -frames:v 1"), "an accurate still near the start seeks from zero");
         var fast = string.Join(" ", Arguments("in.mkv", 600.5, accurate: false, "scale=640:-2", 3));
         Expect(fast.Contains("-ss 600.5 -i in.mkv -frames:v 1"), "a fast still seeks once, before the input");
+        Expect(fast.Contains("-map 0:V:0"), "still previews select the movie even when the poster is larger");
+        var hdr = string.Join(" ", Arguments("in.mkv", 3600, true, "scale=640:-2", 2, new VideoColor("smpte2084", "bt2020", "bt2020nc")));
+        Expect(hdr.Contains("scale=640:-2,zscale=") && hdr.Contains("tonemap=tonemap=mobius"), "HDR still previews resize and tone-map to SDR");
         return errors;
     }
 

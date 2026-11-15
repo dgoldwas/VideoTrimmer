@@ -1,6 +1,11 @@
 using VideoTrimmer;
 using System.Diagnostics;
 using System.Text.Json;
+if (args is ["--project", var project, var projectFolder])
+{
+ await ProjectExportVerification.Run(project, projectFolder);
+ return;
+}
 var root = Path.GetFullPath(args.Length > 0 ? args[0] : "artifacts/hdr-export-check");
 Directory.CreateDirectory(root);
 var runner = new FfmpegRunner();

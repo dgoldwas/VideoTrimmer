@@ -61,7 +61,7 @@ sealed class EditPlayer : IDisposable
     public event Action<PlaybackEnd, string?>? Ended;
 
     /// <summary>Starts at <paramref name="startFrame"/>, or at the next kept frame when it falls in a cut.</summary>
-    public bool Play(string input, IReadOnlyList<Segment> segments, double fps, long startFrame, Size size, bool hasAudio)
+    public bool Play(string input, IReadOnlyList<Segment> segments, double fps, long startFrame, Size size, bool hasAudio, VideoColor color = default, bool useLibplacebo = false)
     {
         Stop();
         if (runner.Ffmpeg is null || fps <= 0) return false;
@@ -100,7 +100,7 @@ sealed class EditPlayer : IDisposable
         }
 
         session = current;
-        _ = ProduceVideoAsync(current, input, pieces, fps, size);
+        _ = ProduceVideoAsync(current, input, pieces, fps, size, color, useLibplacebo);
         if (current.Audio is not null) _ = ProduceAudioAsync(current, input, pieces, fps);
         else current.AudioDone = true;
         tick.Start();
@@ -204,7 +204,7 @@ sealed class EditPlayer : IDisposable
         surfaces[1] = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppRgb);
     }
 
-    async Task ProduceVideoAsync(Session current, string input, IReadOnlyList<Piece> pieces, double fps, Size size)
+    async Task ProduceVideoAsync(Session current, string input, IReadOnlyList<Piece> pieces, double fps, Size size, VideoColor color, bool useLibplacebo)
     {
         var token = current.Cancel.Token;
         try
@@ -217,9 +217,9 @@ sealed class EditPlayer : IDisposable
                     "-nostdin", "-hide_banner", "-loglevel", "error",
                     "-ss", Seconds(piece.In / fps),
                     "-i", input,
-                    "-map", "0:v:0", "-an", "-sn", "-dn",
+                    "-map", "0:V:0", "-an", "-sn", "-dn",
                     "-frames:v", count.ToString(CultureInfo.InvariantCulture),
-                    "-vf", $"scale={size.Width}:{size.Height}:flags=bilinear,setsar=1,format=bgr0",
+                    "-vf", HdrExport.PreviewFilter($"scale={size.Width}:{size.Height}:flags=bilinear,setsar=1", color, useLibplacebo) + ",format=bgr0",
                     "-f", "rawvideo", "pipe:1",
                 ];
                 await runner.StreamAsync(runner.Ffmpeg!, args, async (stdout, ct) =>

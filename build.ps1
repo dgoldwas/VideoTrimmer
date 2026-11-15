@@ -65,6 +65,7 @@ foreach ($filter in @('zscale', 'tonemap', 'libplacebo', 'sidedata')) {
 
 Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $publishRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot 'UPDATE.md') -Destination $publishRoot
+Copy-Item -LiteralPath (Join-Path $projectRoot 'docs') -Destination $publishRoot -Recurse
 if ($Zip) {
   $zipPath = "$publishRoot.zip"
   if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }

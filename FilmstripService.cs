@@ -76,7 +76,9 @@ sealed class FilmstripService
         CancellationToken token,
         Action<int, int> onProgress,
         Action<bool, string> onCompleted,
-        Func<bool> isExporting)
+        Func<bool> isExporting,
+        VideoColor color = default,
+        bool useLibplacebo = false)
     {
         if (key.Count < 1 || runner.Ffmpeg is null)
         {
@@ -89,7 +91,7 @@ sealed class FilmstripService
 
         var buildGeneration = ++generation;
         Building = key;
-        _ = BuildAsync(owner, timeline, input, duration, key, buildGeneration, token, onProgress, onCompleted, isExporting);
+        _ = BuildAsync(owner, timeline, input, duration, key, buildGeneration, token, onProgress, onCompleted, isExporting, color, useLibplacebo);
     }
 
     async Task BuildAsync(
@@ -102,7 +104,9 @@ sealed class FilmstripService
         CancellationToken token,
         Action<int, int> onProgress,
         Action<bool, string> onCompleted,
-        Func<bool> isExporting)
+        Func<bool> isExporting,
+        VideoColor color,
+        bool useLibplacebo)
     {
         // Sparse fast seeks stay responsive on long videos. One fps filter would decode the whole file.
         var count = key.Count;
@@ -160,7 +164,7 @@ sealed class FilmstripService
                 var frame = key.Start + (key.End - key.Start) * (index + 0.5) / count;
                 // The last tile can hang past the end of the clip, where there is nothing to decode: show the final half second.
                 var time = Math.Min(frame / fps, Math.Max(0, duration - 0.5));
-                var bitmap = await stills.CaptureAsync(input, duration, time, accurate: false, "scale=-2:" + height, 5, token).ConfigureAwait(false);
+                var bitmap = await stills.CaptureAsync(input, duration, time, accurate: false, "scale=-2:" + height, 5, token, color, useLibplacebo).ConfigureAwait(false);
                 void Assign()
                 {
                     if (buildGeneration != generation || owner.IsDisposed || bitmap is null)

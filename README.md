@@ -13,6 +13,8 @@ A small Windows desktop app for cutting a video down to the parts you want to ke
 - **Play the edit:** play/pause plays the kept segments back to back with sound, the way the export will join them. ⏮ and ⏭ skip between cuts.
 - Export a fast video copy, or re-encode for exact frames. Fast video copy can start slightly early, on a keyframe.
 - **HDR → SDR:** PQ/HDR10 and HLG exports automatically re-encode to SDR BT.709 using FrameGrabber's linear-light Mobius tone map. Dolby Vision uses libplacebo to apply its metadata; compatible HDR10/HLG base layers can fall back to the CPU pipeline. Dolby Vision without a compatible base layer requires a working Vulkan driver and the packaged FFmpeg. Ten-bit SDR is not mistaken for HDR.
+- HDR processing also applies to still previews, the filmstrip, segment thumbnails and playback, at preview resolution.
+- **Export size:** Exact frames offers Source resolution or Up to 1080p (faster). The 1080p option fits the picture inside 1920×1080 without enlarging smaller sources. Balanced uses x264 veryfast at CRF 23; High keeps the slower CRF 18 encode. A faster preset can produce larger files at the same CRF.
 - Status, errors and export progress appear in a dedicated strip below the timeline. Export has a separate progress bar and percentage, and Cancel stays beside the Export button.
 - Exact mode offers High / Balanced / Small quality presets and an optional copy-audio setting.
 - When the source has subtitle tracks, Exact mode can burn one into the picture. Text subtitles (SRT, ASS, mov_text, WebVTT) are drawn with libass, using any fonts the file carries; picture subtitles (Blu-ray PGS, DVD, DVB) are overlaid. The burned file leaves out the subtitle streams so they do not show twice.
@@ -74,6 +76,8 @@ The project's `<Version>` (YYYY.MM.DD.##) is the only place the version is set. 
 
 `VideoTrimmer.exe --render <folder>` makes a short test clip and saves pictures of the window in its main states (empty, loaded, trimmed, Exact mode, zoomed, exporting), the title bar, the File and Edit menus, the shortcuts sheet and Settings, then the light theme, for checking the UI without clicking through it.
 
+`VideoTrimmer.exe --render-project <project.json> <folder>` checks reopening a supplied project without changing it, saves processed/unprocessed preview comparisons, and silently exercises the playback decoder. `dotnet run --project tests/ExportVerification.csproj -- --project <project.json> <folder>` verifies full separate and stitched 1080p exports against the saved frame counts, output color tags and stream counts; use the packaged FFmpeg on `PATH`. These diagnostics write only to the requested output folder.
+
 `build.ps1` runs the `--check` self-test on the published exe and bundles a pinned, checksum-verified GPL FFmpeg build from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) into `tools\`. Exact-frame export needs libx264, which LGPL builds leave out. The installer needs [Inno Setup 6](https://jrsoftware.org/isinfo.php). The icon comes from `assets\make-icon.ps1`.
 
 ## Trimming behavior
@@ -81,6 +85,8 @@ The project's `<Version>` (YYYY.MM.DD.##) is the only place the version is set. 
 Fast copy avoids video re-encoding and is quick, but it can only start cleanly on a keyframe. The output may therefore begin slightly before the selected time. Exact frames re-encodes video to honor the requested frame boundaries; it is slower and the output can differ in quality. Always review exported media before relying on it.
 
 With several segments, Fast video copy saves each part beside the output (in a hidden `.<name>.parts` folder that is removed afterwards), copying its video and converting its audio to stereo AAC, then joins the parts with FFmpeg's concat demuxer. Every segment can start on an earlier keyframe. Exact frames opens and seeks the input separately for each segment, then joins the decoded sections in one re-encode. That re-encode keeps only the first video and audio track. HDR processing runs on each selected section before subtitle burn-in and joining; it never requires a whole-film conversion. Color detection reads stream metadata, with at most eight opening video packets decoded if transfer tags are missing.
+
+Exact exports exclude attached cover pictures from the video encoder. Same-container separate cuts retain audio/subtitle tracks and font attachments, with subtitles/fonts copied and audio converted to stereo. Input reads are bounded to the cut; export progress uses video frames so sparse subtitle timestamps cannot advance it to 100% early. The [HandBrake comparison](docs/export-performance.md) explains the confirmed poster stall and subtitle read-ahead, plus the settings that affect encoding speed. Text subtitle burn-in uses libass, which separately reads the source subtitle track during filter initialization.
 
 Run the real export checks with `dotnet run --project tests/ExportVerification.csproj`, with the packaged FFmpeg tools on `PATH`. This generates a small-resolution one-hour PQ/5.1 source under `artifacts/hdr-export-check`, exports late cuts through CPU and available libplacebo paths, and checks SDR tags, removal of HDR metadata, duration, separate/stitched cuts, HLG without audio, and center-channel audio reaching both stereo channels. It does not replace visual acceptance on real Dolby Vision footage.
 

@@ -15,7 +15,7 @@ sealed class FfmpegRunner
         Ffprobe = Find("ffprobe.exe");
     }
 
-    public async Task<string> RunAsync(string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken = default, IProgress<TimeSpan>? progress = null)
+    public async Task<string> RunAsync(string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken = default, IProgress<TimeSpan>? progress = null, double? progressFps = null)
     {
         using var process = Start(executable, arguments, binaryStdout: false);
         var stderrTask = process.StandardError.ReadToEndAsync();
@@ -29,7 +29,10 @@ sealed class FfmpegRunner
                 var line = await process.StandardOutput.ReadLineAsync(cancellationToken).ConfigureAwait(false);
                 if (line is null) break;
                 stdout.AppendLine(line);
-                if (TryParseProgress(line, out var time))
+                var hasTime = progressFps is { } fps
+                    ? TryParseFrameProgress(line, fps, out var time)
+                    : TryParseProgress(line, out time);
+                if (hasTime)
                     progress?.Report(time);
             }
 
@@ -190,6 +193,18 @@ sealed class FfmpegRunner
         if (text.Length == 0 || text.Equals("N/A", StringComparison.OrdinalIgnoreCase)) return false;
         if (!TimeSpan.TryParse(text, CultureInfo.InvariantCulture, out time)) return false;
         if (time < TimeSpan.Zero) time = TimeSpan.Zero;
+        return true;
+    }
+
+    public static bool TryParseFrameProgress(string line, double fps, out TimeSpan time)
+    {
+        time = TimeSpan.Zero;
+        const string prefix = "frame=";
+        if (!line.StartsWith(prefix, StringComparison.Ordinal) || !double.IsFinite(fps) || fps <= 0) return false;
+        if (!long.TryParse(line[prefix.Length..].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var frames) || frames < 0) return false;
+        var seconds = frames / fps;
+        if (seconds >= TimeSpan.MaxValue.TotalSeconds) return false;
+        time = TimeSpan.FromSeconds(seconds);
         return true;
     }
 

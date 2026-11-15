@@ -20,6 +20,9 @@ internal static class Program
                 .Concat(UpdateService.SelfCheck())
                 .Concat(Theme.SelfCheck())
                 .Concat(AppSettings.SelfCheck())
+                .Concat(Menus.SelfCheck())
+                .Concat(DropPrompt.SelfCheck())
+                .Concat(SidePanel.SelfCheck())
                 .ToList();
             var path = Path.Combine(Path.GetTempPath(), "vt-check.txt");
             File.WriteAllLines(path, errors.Count == 0 ? ["ok"] : errors);
@@ -29,6 +32,8 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         if (args is ["--render", var folder])
             Environment.Exit(MainForm.Render(Path.GetFullPath(folder)));
+        if (args is ["--render-project", var project, var projectFolder])
+            Environment.Exit(MainForm.Render(Path.GetFullPath(projectFolder), Path.GetFullPath(project)));
 
         var startup = args.Length > 0 && File.Exists(args[0]) ? args[0] : null;
         var settings = AppSettings.Load();

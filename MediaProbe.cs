@@ -65,7 +65,7 @@ static class MediaProbe
         {
             // Some containers expose colorimetry only after decoding. Bound this to eight opening video packets.
             var frames = await runner.RunAsync(runner.Ffprobe, ["-v", "quiet", "-print_format", "json",
-                "-select_streams", "v:0", "-read_intervals", "%+#8", "-show_frames",
+                "-select_streams", "V:0", "-read_intervals", "%+#8", "-show_frames",
                 "-show_entries", "frame=color_transfer,color_primaries,color_space", path], cancellationToken).ConfigureAwait(false);
             using var frameDoc = JsonDocument.Parse(frames);
             if (frameDoc.RootElement.TryGetProperty("frames", out var list))
@@ -85,7 +85,10 @@ static class MediaProbe
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
         var video = root.GetProperty("streams").EnumerateArray()
-            .FirstOrDefault(stream => stream.ValueKind == JsonValueKind.Object && stream.TryGetProperty("codec_type", out var kind) && kind.GetString() == "video");
+            .FirstOrDefault(stream => stream.ValueKind == JsonValueKind.Object
+                && stream.TryGetProperty("codec_type", out var kind) && kind.GetString() == "video"
+                && !(stream.TryGetProperty("disposition", out var disposition)
+                    && disposition.TryGetProperty("attached_pic", out var attached) && attached.GetInt32() == 1));
         if (video.ValueKind == JsonValueKind.Undefined)
             throw new InvalidOperationException("The file does not contain a video stream.");
         var audioCodecs = root.GetProperty("streams").EnumerateArray()
@@ -192,6 +195,8 @@ static class MediaProbe
             ],"format":{"duration":"10.0"}}
             """;
         var info = Parse(json);
+        var covered = Parse(json.Replace("\"streams\":[", "\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"mjpeg\",\"disposition\":{\"attached_pic\":1},\"r_frame_rate\":\"1/1\",\"duration\":\"10.0\",\"width\":3000,\"height\":4000},"));
+        Expect(covered.VideoCodec == "wmv3" && covered.Fps == 24, "a cover before the movie must not supply its codec, frame rate or color");
         var hdr = Parse(json.Replace("\"codec_name\":\"wmv3\"", "\"codec_name\":\"hevc\",\"color_transfer\":\"smpte2084\",\"color_primaries\":\"bt2020\",\"color_space\":\"bt2020nc\""));
         Expect(hdr.Color.IsHdr && hdr.Color.Primaries == "bt2020", "PQ metadata identifies HDR without frame scanning");
         var dolby = Parse(json.Replace("\"codec_name\":\"wmv3\"", "\"codec_name\":\"hevc\",\"side_data_list\":[{\"side_data_type\":\"DOVI configuration record\",\"dv_profile\":5,\"dv_bl_signal_compatibility_id\":0}]"));

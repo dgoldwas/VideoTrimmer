@@ -19,6 +19,13 @@ static class HdrExport
 
     public static bool CanUseCpu(VideoColor color) => color.DolbyProfile == 0 || color.Compatibility is 1 or 4;
 
+    // Small previews do expensive linear-light work at display size, while retaining source HDR metadata.
+    public static string PreviewFilter(string resize, VideoColor color, bool libplacebo)
+    {
+        var tone = Filter(color, libplacebo);
+        return resize.Length == 0 ? tone : tone.Length == 0 ? resize : resize + "," + tone;
+    }
+
     public static string[] OutputTags(VideoColor color) => color.IsHdr
         ? ["-pix_fmt", "yuv420p", "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv"] : [];
 

@@ -764,9 +764,9 @@ sealed class DropPrompt : GlassControl
         Controls.Add(Open);
     }
 
-    protected override void OnMouseUp(MouseEventArgs e)
+    protected override void OnMouseClick(MouseEventArgs e)
     {
-        base.OnMouseUp(e);
+        base.OnMouseClick(e);
         if (e.Button == MouseButtons.Left)
             OpenRequested?.Invoke(this, EventArgs.Empty);
     }
@@ -792,6 +792,21 @@ sealed class DropPrompt : GlassControl
     }
 
     int BlockTop() => Math.Max(S(16), (ClientSize.Height - S(140)) / 2);
+
+    public static IReadOnlyList<string> SelfCheck()
+    {
+        var errors = new List<string>();
+        using var prompt = new DropPrompt();
+        var opened = 0;
+        prompt.OpenRequested += (_, _) => opened++;
+        // A file dialog can return a mouse release to the window beneath it, without a matching press.
+        prompt.OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, 20, 20, 0));
+        if (opened != 0) errors.Add("an unmatched mouse release must not open a second file picker");
+        opened = 0;
+        prompt.Open.PerformClick();
+        if (opened != 1) errors.Add("the explicit Open button opens one file picker");
+        return errors;
+    }
 }
 
 enum StatusKind { Info, Busy, Good, Error }
@@ -1151,6 +1166,7 @@ sealed class ExportBar : GlassControl
     public Segmented Mode { get; }
     public Segmented Quality { get; }
     public GlassLabel AudioOutput { get; }
+    public GlassButton OutputSize { get; }
     public GlassButton Subtitles { get; }
     public GlassButton Format { get; }
     public GlassButton Export { get; }
@@ -1162,6 +1178,7 @@ sealed class ExportBar : GlassControl
     readonly List<(string Label, Rectangle Row)> rows = new();
     bool exactMode;
     ExactQuality quality = ExactExportOptions.Default.Quality;
+    ExportSize outputSize;
     VideoColor color;
     IReadOnlyList<SubtitleTrack> subtitleTracks = [];
     SubtitleTrack? burn;
@@ -1178,15 +1195,17 @@ sealed class ExportBar : GlassControl
         Mode = new Segmented { Items = [ExportModeCopy.FastTitle, ExportModeCopy.ExactTitle], AccessibleName = "Export mode", OnPanel = true };
         Quality = new Segmented { Items = Qualities.Select(ExactExportPresets.Title).ToArray(), Font = Theme.Ui(9), AccessibleName = "Quality", Visible = false, OnPanel = true };
         AudioOutput = new GlassLabel { Text = "Stereo AAC · 192 kbps", AccessibleName = "Audio output: stereo AAC, 192 kbps", Font = Theme.Ui(9.5f), OnPanel = true };
+        OutputSize = new GlassButton { AlignLeft = true, Chevron = true, Font = Theme.Ui(9.5f), AccessibleName = "Output size", Visible = false, OnPanel = true };
         Subtitles = new GlassButton { AlignLeft = true, Chevron = true, Font = Theme.Ui(9.5f), AccessibleName = "Burn in subtitles", Visible = false, OnPanel = true };
         Format = new GlassButton { AlignLeft = true, Chevron = true, Font = Theme.Ui(9.5f), AccessibleName = "Output format", OnPanel = true };
         Export = new GlassButton { Text = "Export…", Kind = ButtonKind.Primary, AccessibleName = "Export", Enabled = false, OnPanel = true };
         Cancel = new GlassButton { Text = "Cancel", Kind = ButtonKind.Caution, AccessibleName = "Cancel export", Enabled = false, Visible = false, OnPanel = true };
         Explanation = new GlassLabel { ForeColor = Theme.Muted, Font = Theme.Ui(9), Wrap = true, OnPanel = true };
-        Controls.AddRange([Mode, Quality, AudioOutput, Subtitles, Format, Explanation, Export, Cancel]);
+        Controls.AddRange([Mode, Quality, OutputSize, AudioOutput, Subtitles, Format, Explanation, Export, Cancel]);
 
         Mode.Picked += index => ModePicked?.Invoke(index == 1);
         Quality.Picked += index => SetQuality(Qualities[index]);
+        OutputSize.Click += (_, _) => ChooseSize();
         Subtitles.Click += (_, _) => ChooseSubtitles();
         Format.Click += (_, _) => ChooseFormat();
 
@@ -1199,7 +1218,7 @@ sealed class ExportBar : GlassControl
     /// <summary>An option changed in a way that can change this bar's height.</summary>
     public event EventHandler? OptionsChanged;
 
-    public ExactExportOptions ExactOptions => new(quality, burn, color);
+    public ExactExportOptions ExactOptions => new(quality, burn, color, Size: outputSize);
 
     public OutputFormat OutputFormat => format;
 
@@ -1207,10 +1226,11 @@ sealed class ExportBar : GlassControl
 
     public void SetMode(bool exact)
     {
-        exact |= color.IsHdr;
+        exact |= color.IsHdr || outputSize != ExportSize.Source;
         exactMode = exact;
         Mode.SelectedIndex = exact ? 1 : 0;
         Quality.Visible = exact;
+        OutputSize.Visible = exact;
         Subtitles.Visible = exact && HasSubtitles;
         Sync();
         PerformLayout();
@@ -1221,7 +1241,7 @@ sealed class ExportBar : GlassControl
     public void SetBusy(bool value)
     {
         busy = value;
-        Mode.Enabled = !value && !color.IsHdr;
+        Mode.Enabled = !value && !color.IsHdr && outputSize == ExportSize.Source;
         Format.Enabled = !value;
         Cancel.Enabled = value;
         Cancel.Visible = value;
@@ -1233,7 +1253,7 @@ sealed class ExportBar : GlassControl
     public void SetSource(string extension, MediaInfo media)
     {
         color = media.Color;
-        Mode.Enabled = !busy && !color.IsHdr;
+        Mode.Enabled = !busy && !color.IsHdr && outputSize == ExportSize.Source;
         sourceExtension = extension;
         subtitleTracks = media.Subtitles;
         videoCodec = media.VideoCodec;
@@ -1255,7 +1275,7 @@ sealed class ExportBar : GlassControl
     public int MeasureHeight(int width)
     {
         var height = S(36) + S(8);
-        var optionRows = 2 + (exactMode ? 1 + (HasSubtitles ? 1 : 0) : 0);
+        var optionRows = 2 + (exactMode ? 2 + (HasSubtitles ? 1 : 0) : 0);
         height += optionRows * S(RowHeight) + (optionRows - 1) * S(4);
         height += S(10) + Explanation.MeasureHeight(width) + S(12) + S(40);
         return height;
@@ -1266,6 +1286,22 @@ sealed class ExportBar : GlassControl
         if (!exactMode || quality == value) return;
         quality = value;
         Sync();
+    }
+
+    void ChooseSize()
+    {
+        var menu = Menus.Create();
+        menu.Items.Add(Menus.Item("Source resolution", outputSize == ExportSize.Source, () => SetOutputSize(ExportSize.Source)));
+        menu.Items.Add(Menus.Item("Up to 1080p (faster)", outputSize == ExportSize.Hd1080, () => SetOutputSize(ExportSize.Hd1080)));
+        Menus.ShowBelow(menu, OutputSize);
+    }
+
+    internal void SetOutputSize(ExportSize value)
+    {
+        outputSize = value;
+        Mode.Enabled = !busy && !color.IsHdr && value == ExportSize.Source;
+        Sync();
+        OptionsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>One track toggles on and off; several open a menu to pick which one.</summary>
@@ -1334,6 +1370,10 @@ sealed class ExportBar : GlassControl
     {
         Quality.SelectedIndex = Array.IndexOf(Qualities, quality);
         Quality.Enabled = !busy;
+        OutputSize.Enabled = !busy;
+        OutputSize.Text = outputSize == ExportSize.Source ? "Source resolution" : "Up to 1080p";
+        OutputSize.AccessibleDescription = outputSize == ExportSize.Source ? "Keeps the source dimensions." : "Fits within 1920 by 1080 without enlarging smaller videos. Faster, with smaller files.";
+        OutputSize.Invalidate();
         Subtitles.Enabled = !busy;
         Subtitles.Text = burn is { } track ? track.Label : "Off";
         Subtitles.AccessibleDescription = ExactExportPresets.SubtitleHint(burn);
@@ -1386,6 +1426,7 @@ sealed class ExportBar : GlassControl
         if (exactMode)
         {
             Row("Quality", Quality, S(1));
+            Row("Size", OutputSize, S(1));
             if (HasSubtitles) Row("Subtitles", Subtitles, S(1));
         }
 
@@ -1447,6 +1488,18 @@ sealed class SidePanel : GlassControl
     }
 
     public int Pad => S(14);
+    internal bool ContentFits => List.Height >= S(46) && List.Bottom + S(6) <= editorHeader.Top;
+
+    public static IReadOnlyList<string> SelfCheck()
+    {
+        using var panel = new SidePanel();
+        panel.Export.SetSource(".mkv", new MediaInfo(1000, 24, 24000, true, 16 / 9d,
+            [new SubtitleTrack(0, "subrip", "eng", null), new SubtitleTrack(1, "subrip", "fre", null)], "hevc", ["truehd"], new VideoColor("smpte2084", "bt2020", "bt2020nc")));
+        panel.Export.SetSegmentCount(2);
+        panel.SetBounds(0, 0, 352, 584);
+        panel.PerformLayout();
+        return panel.ContentFits ? [] : ["the HDR export options must not overlap the segment editor at the minimum window size"];
+    }
 
     /// <summary>Muted text beside the Segments title, such as the count and kept length.</summary>
     public string SegmentsDetail
@@ -1469,22 +1522,25 @@ sealed class SidePanel : GlassControl
         base.OnLayout(levent);
         var pad = Pad;
         var inner = Math.Max(S(120), ClientSize.Width - pad * 2);
-        var title = S(22);
+        var exportHeight = Export.MeasureHeight(inner);
+        var editorHeight = Editor.MeasureHeight();
+        var compact = ClientSize.Height < exportHeight + editorHeight + S(216);
+        var title = S(compact ? 18 : 22);
+        var gap = S(compact ? 6 : 12);
+        var headerGap = S(compact ? 5 : 8);
         var resetWidth = Reset.PreferredWidth() - S(8);
         Reset.SetBounds(ClientSize.Width - pad - resetWidth + S(6), pad - S(2), resetWidth, S(26));
         segmentsHeader = new Rectangle(pad, pad, Math.Max(10, Reset.Left - S(6) - pad), title);
 
         // The export block and the editor keep their natural heights; the list takes what is left.
-        var exportHeight = Export.MeasureHeight(inner);
         var exportTop = ClientSize.Height - pad - exportHeight;
-        exportHeader = new Rectangle(pad, exportTop - S(8) - title, inner, title);
-        secondDivider = exportHeader.Top - S(12);
-        var editorHeight = Editor.MeasureHeight();
-        var editorTop = secondDivider - S(12) - editorHeight;
-        editorHeader = new Rectangle(pad, editorTop - S(8) - title, inner, title);
-        firstDivider = editorHeader.Top - S(12);
-        var listTop = segmentsHeader.Bottom + S(10);
-        List.SetBounds(pad, listTop, inner, Math.Max(S(40), firstDivider - S(12) - listTop));
+        exportHeader = new Rectangle(pad, exportTop - headerGap - title, inner, title);
+        secondDivider = exportHeader.Top - gap;
+        var editorTop = secondDivider - gap - editorHeight;
+        editorHeader = new Rectangle(pad, editorTop - headerGap - title, inner, title);
+        firstDivider = editorHeader.Top - gap;
+        var listTop = segmentsHeader.Bottom + S(compact ? 6 : 10);
+        List.SetBounds(pad, listTop, inner, Math.Max(S(48), firstDivider - gap - listTop));
         Editor.SetBounds(pad, editorTop, inner, editorHeight);
         Export.SetBounds(pad, exportTop, inner, exportHeight);
         Invalidate();
@@ -1618,6 +1674,25 @@ sealed class TransportBar : GlassControl
 /// <summary>Opaque dark drop-down menus.</summary>
 static class Menus
 {
+    public static IReadOnlyList<string> SelfCheck()
+    {
+        var errors = new List<string>();
+        var (dark, accent) = (Theme.IsDark, Theme.CurrentTint.Name);
+        try
+        {
+            foreach (var theme in new[] { true, false })
+            {
+                Theme.Apply(theme, accent);
+                var colors = new MenuColors();
+                foreach (var fill in new[] { colors.MenuItemSelected, colors.MenuItemSelectedGradientBegin,
+                    colors.MenuItemSelectedGradientEnd, colors.MenuItemPressedGradientBegin, colors.MenuItemPressedGradientEnd })
+                    if (Theme.Contrast(Theme.Text, fill) < 4.5)
+                        errors.Add($"{(theme ? "dark" : "light")} menu highlight needs readable foreground contrast");
+            }
+        }
+        finally { Theme.Apply(dark, accent); }
+        return errors;
+    }
     public static ContextMenuStrip Create() => new()
     {
         Renderer = new ToolStripProfessionalRenderer(new MenuColors()) { RoundedEdges = false },
@@ -1741,6 +1816,7 @@ static class Menus
 
     sealed class MenuColors : ProfessionalColorTable
     {
+        public MenuColors() => UseSystemColors = false;
         public override Color ToolStripDropDownBackground => Theme.Menu;
         public override Color MenuBorder => Theme.MenuBorder;
         // The hovered item steps away from the menu's color: lighter on the dark theme, darker on the light one.
@@ -1748,6 +1824,11 @@ static class Menus
 
         public override Color MenuItemBorder => Highlight;
         public override Color MenuItemSelected => Highlight;
+        public override Color MenuItemSelectedGradientBegin => Highlight;
+        public override Color MenuItemSelectedGradientEnd => Highlight;
+        public override Color MenuItemPressedGradientBegin => Highlight;
+        public override Color MenuItemPressedGradientMiddle => Highlight;
+        public override Color MenuItemPressedGradientEnd => Highlight;
         public override Color CheckBackground => Theme.Menu;
         public override Color CheckSelectedBackground => Highlight;
         public override Color CheckPressedBackground => Highlight;

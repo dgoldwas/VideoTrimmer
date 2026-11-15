@@ -9,7 +9,7 @@ public sealed partial class MainForm
 {
     static readonly TimeSpan RenderWait = TimeSpan.FromSeconds(30);
 
-    public static int Render(string folder)
+    public static int Render(string folder, string? project = null)
     {
         Directory.CreateDirectory(folder);
         var code = 1;
@@ -18,7 +18,8 @@ public sealed partial class MainForm
         {
             try
             {
-                await form.RenderStatesAsync(folder);
+                if (project is null) await form.RenderStatesAsync(folder);
+                else await form.RenderProjectAsync(project, folder);
                 code = 0;
             }
             catch (Exception ex)
@@ -52,6 +53,9 @@ public sealed partial class MainForm
         await Task.Delay(300);
         Save(this, folder, "1-empty");
         Save(Popup(topBar.FileMenu), folder, "1-file-menu", close: true);
+        var highlighted = Popup(topBar.FileMenu);
+        highlighted.Items.OfType<ToolStripMenuItem>().First(item => item.Enabled).Select();
+        Save(highlighted, folder, "1-file-menu-highlighted", close: true);
 
         LoadVideo(clip);
         await Until(() => timeline.HasMedia && preview.Image is not null && filmstrip.Current is not null && filmstrip.Building is null);
@@ -70,6 +74,7 @@ public sealed partial class MainForm
         Save(Popup(topBar.EditMenu), folder, "3-edit-menu", close: true);
 
         ChooseExact(true);
+        exportBar.SetOutputSize(ExportSize.Hd1080);
         await Task.Delay(200);
         Save(this, folder, "4-exact");
 
@@ -95,6 +100,7 @@ public sealed partial class MainForm
         Save(this, folder, "6-exporting-small");
         Size = originalSize;
         exportBar.SetBusy(false);
+        SetStatus("Ready.", StatusKind.Info);
         timeline.Locked = false;
         UpdateReadouts();
         LayoutChrome();
@@ -123,6 +129,65 @@ public sealed partial class MainForm
         Save(light, folder, "9-light-settings");
         light.Close();
         Save(Popup(topBar.FileMenu), folder, "9-light-menu", close: true);
+    }
+
+    async Task RenderProjectAsync(string project, string folder)
+    {
+        OpenProjectFile(project);
+        if (drop.Enabled) throw new InvalidOperationException("The empty prompt must not accept clicks during loading.");
+        await Until(() => projectPath == project && timeline.HasMedia);
+        var saved = CutList.Load(File.ReadAllText(project));
+        var expected = CutList.Rescale(saved.Segments, saved.Fps, timeline.Fps);
+        if (!timeline.AllSegments.SequenceEqual(expected)) throw new InvalidOperationException("Project cuts changed when reopened.");
+        timeline.SetPlayhead(timeline.AllSegments[0].In);
+        await Until(() => preview.Image is not null);
+        previewTimer.Stop();
+        accurateTimer.Stop();
+        await GrabPreviewAsync(timeline.PlayheadFrame, accurate: true);
+        if (preview.Image is null) throw new InvalidOperationException("The project's preview did not load.");
+        Save(this, folder, "project-opened");
+        var originalSize = Size;
+        Size = MinimumSize;
+        LayoutChrome();
+        Save(this, folder, "project-opened-small");
+        if (!side.ContentFits) throw new InvalidOperationException("Project controls overlap at the minimum window size.");
+        Size = originalSize;
+        LayoutChrome();
+        Save(preview, folder, "project-tonemapped-preview");
+        using var mapped = new Bitmap(preview.Image);
+        using var raw = await stills.CaptureAsync(input!, duration, timeline.SeekTime(timeline.PlayheadFrame), true, "scale=" + PreviewWidth() + ":-2", 2, CancellationToken.None);
+        if (raw is null) throw new InvalidOperationException("Could not make the unprocessed comparison frame.");
+        raw.Save(Path.Combine(folder, "project-unprocessed-preview.png"));
+        double difference = 0;
+        var samples = 0;
+        for (var y = 0; y < Math.Min(raw.Height, mapped.Height); y += 8)
+            for (var x = 0; x < Math.Min(raw.Width, mapped.Width); x += 8)
+            {
+                var a = raw.GetPixel(x, y);
+                var b = mapped.GetPixel(x, y);
+                difference += (Math.Abs(a.R - b.R) + Math.Abs(a.G - b.G) + Math.Abs(a.B - b.B)) / 3d;
+                samples++;
+            }
+        difference /= Math.Max(1, samples);
+        if (sourceColor.IsHdr && difference < 1) throw new InvalidOperationException("The HDR preview still looks like the unprocessed frame.");
+
+        // Exercise the real playback producer silently; it shares neither the still command nor its cache.
+        var shown = new TaskCompletionSource<long>();
+        void Frame(long frame) => shown.TrySetResult(frame);
+        player.FrameShown += Frame;
+        var first = timeline.AllSegments[0];
+        var size = new Size(640, Math.Max(2, (int)Math.Round(640 / aspect / 2) * 2));
+        if (!player.Play(input!, [new Segment(first.In, Math.Min(first.Out, first.In + 48))], fps, first.In, size, false, sourceColor, previewUseLibplacebo))
+            throw new InvalidOperationException("Project playback did not start.");
+        await shown.Task.WaitAsync(RenderWait);
+        Save(preview, folder, "project-playback-preview");
+        player.FrameShown -= Frame;
+        StopPlayback();
+        File.WriteAllText(Path.Combine(folder, "project-check.json"), System.Text.Json.JsonSerializer.Serialize(new
+        {
+            input, sourceColor, previewUseLibplacebo, segments = timeline.AllSegments,
+            meanPreviewDifference = difference, playbackFrame = shown.Task.Result,
+        }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
     }
 
     static ToolStripDropDown Popup(ToolStripMenuItem menu)

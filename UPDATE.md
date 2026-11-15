@@ -1,5 +1,15 @@
 # Updates
 
+## 2026-11-15 (2026.11.15.09)
+
+- Dark menus use the app's colors for all highlighted and pressed states, with contrast checks.
+- Opening a project no longer lets an unmatched mouse release activate the empty window's Open prompt. That prompt is disabled while metadata loads.
+- HDR/Dolby Vision tone mapping now reaches the main preview, filmstrip, segment thumbnails and playback. Previews resize before tone mapping.
+- Fixed a severe same-container export stall on movies with an attached poster: exact exports select the main video and copy subtitle/font streams separately. Every mapped audio track still becomes stereo AAC.
+- Exact exports cap input reads as well as output duration, preventing sparse subtitle streams from reading beyond the cut. Progress follows encoded video frames rather than subtitle timestamps.
+- Exact export now offers **Size → Up to 1080p (faster)** alongside **Source resolution**. Resizing runs before tone mapping where possible. Balanced uses x264 veryfast at the same CRF 23; High retains its slower CRF 18 setting.
+- Validated the supplied two-cut network project with real HDR preview/playback and full exports. See `docs/export-performance.md` for the HandBrake comparison and measured causes.
+
 ## 2026-11-15 (2026.11.15.08)
 
 - HDR/PQ and HLG exports automatically use exact-frame re-encoding to SDR BT.709. The CPU pipeline uses FrameGrabber's linear-light Mobius tone map. Dolby Vision uses libplacebo when available; CPU fallback is limited to compatible HDR10/HLG base layers.

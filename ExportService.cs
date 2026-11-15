@@ -39,10 +39,10 @@ static class ExportService
         Remux? remux = null)
     {
         var options = exactOptions ?? ExactExportOptions.Default;
-        exact |= options.Color.IsHdr;
+        exact |= options.Color.IsHdr || options.Size != ExportSize.Source;
         var start = Text(inSeconds);
         var length = Text(outSeconds - inSeconds);
-        var (maps, subtitleCodecs) = Streams(remux);
+        var (maps, subtitleCodecs) = Streams(remux, exact);
         // Both modes seek before -i. Fast copy then starts on a keyframe; exact mode decodes from the keyframe before
         // the cut and drops frames up to it, so the cut still lands on the chosen frame without decoding the whole
         // file up to it (which stalled long exports at 0%, since nothing is written until the cut is reached).
@@ -73,6 +73,7 @@ static class ExportService
         [
             "-y", "-progress", "pipe:1", "-nostats",
             "-ss", Text(Seek(inSeconds)),
+            "-t", length,
             "-i", input,
             "-t", length,
             .. streams,
@@ -80,7 +81,7 @@ static class ExportService
             "-crf", crf.ToString(CultureInfo.InvariantCulture),
             "-preset", preset,
             .. StereoAudio,
-            .. options.Color.IsHdr && !burning ? new[] { "-vf", HdrExport.Filter(options.Color, options.UseLibplacebo) } : [],
+            .. VideoFilter(options).Length > 0 && !burning ? new[] { "-vf", VideoFilter(options) } : [],
             .. HdrExport.OutputTags(options.Color),
             .. burning ? [] : subtitleCodecs,
             output,
@@ -93,10 +94,12 @@ static class ExportService
     /// export. Changing it keeps the video, the audio, and the subtitle tracks the new container can hold:
     /// MP4 and MOV take text subtitles as mov_text and no picture subtitles; MKV takes text as SRT and pictures as they are.
     /// </summary>
-    static (string[] Maps, string[] SubtitleCodecs) Streams(Remux? remux)
+    static (string[] Maps, string[] SubtitleCodecs) Streams(Remux? remux, bool exact)
     {
-        if (remux is not { } target) return (["-map", "0", "-map", "-0:d"], []);
-        var maps = new List<string> { "-map", "0:V", "-map", "0:a?" };
+        if (remux is not { } target) return exact
+            ? (["-map", "0:V:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?"], ["-c:s", "copy", "-c:t", "copy"])
+            : (["-map", "0", "-map", "-0:d"], []);
+        var maps = new List<string> { "-map", exact ? "0:V:0" : "0:V", "-map", "0:a?" };
         var codecs = new List<string>();
         var kept = 0;
         foreach (var track in target.Subtitles)
@@ -121,10 +124,15 @@ static class ExportService
     static string BurnFilter(string input, SubtitleTrack track, int file, double seek, ExactExportOptions options)
     {
         var tone = HdrExport.Filter(options.Color, options.UseLibplacebo);
-        var prefix = $"[{file}:v:0]";
+        var prefix = $"[{file}:V:0]";
         if (track.IsBitmap)
-            return tone.Length == 0 ? $"{prefix}[{file}:s:{track.Index}]overlay"
-                : $"{prefix}{tone}[toned{file}];[toned{file}][{file}:s:{track.Index}]overlay";
+        {
+            // Picture subtitles use source pixel coordinates, so resize after compositing them.
+            var resize = ResizeFilter(options.Size);
+            return (tone.Length == 0 ? $"{prefix}[{file}:s:{track.Index}]overlay"
+                : $"{prefix}{tone}[toned{file}];[toned{file}][{file}:s:{track.Index}]overlay") + (resize.Length > 0 ? "," + resize : "");
+        }
+        tone = VideoFilter(options);
         if (tone.Length > 0) prefix += tone + ",";
         var subtitles = $"subtitles=filename={FilterValue(Path.GetFullPath(input).Replace('\\', '/'))}:si={track.Index}";
         if (seek <= 0) return $"{prefix}{subtitles}";
@@ -176,7 +184,7 @@ static class ExportService
             return new ExportPlan([new ExportStep(BuildArguments(input, output, Sec(only.In), Sec(only.Out), exact, exactOptions, remux), total, 1)], null, null, null, [output]);
         }
 
-        exact |= exactOptions?.Color.IsHdr == true;
+        exact |= exactOptions is { } settings && (settings.Color.IsHdr || settings.Size != ExportSize.Source);
         if (exact)
             return new ExportPlan([new ExportStep(BuildExactConcat(input, output, segments, fps, hasAudio, exactOptions ?? ExactExportOptions.Default), total, 1)], null, null, null, [output]);
 
@@ -255,7 +263,7 @@ static class ExportService
         {
             var seek = Seek(segments[i].In / fps);
             args.AddRange(["-ss", Text(seek), "-t", Text((segments[i].Out - segments[i].In) / fps), "-i", input]);
-            graph.Append(options.BurnSubtitles is { } burn ? BurnFilter(input, burn, i, seek, options) + "," : $"[{i}:v:0]" + (options.Color.IsHdr ? HdrExport.Filter(options.Color, options.UseLibplacebo) + "," : ""))
+            graph.Append(options.BurnSubtitles is { } burn ? BurnFilter(input, burn, i, seek, options) + "," : $"[{i}:V:0]" + (VideoFilter(options).Length > 0 ? VideoFilter(options) + "," : ""))
                 .Append($"setpts=PTS-STARTPTS[v{i}];");
             if (hasAudio) graph.Append($"[{i}:a:0]asetpts=PTS-STARTPTS[a{i}];");
         }
@@ -280,6 +288,11 @@ static class ExportService
     }
 
     static readonly string[] StereoAudio = ["-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "192k"];
+
+    static string ResizeFilter(ExportSize size) => size == ExportSize.Hd1080
+        ? "scale=w='min(iw,1920)':h='min(ih,1080)':force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1" : "";
+
+    static string VideoFilter(ExactExportOptions options) => HdrExport.PreviewFilter(ResizeFilter(options.Size), options.Color, options.UseLibplacebo);
 
     static string Text(double seconds) => seconds.ToString("0.######", CultureInfo.InvariantCulture);
 
@@ -325,8 +338,9 @@ static class ExportService
         Expect(string.Join(" ", balanced).Contains("-ac 2"), "exact exports fold audio down to stereo");
         Expect(string.Join(" ", fast).Contains("-c:a aac") && string.Join(" ", fast).Contains("-ac 2"), "fast exports copy video but downmix audio");
         Expect(balanced.Contains("-crf") && balanced.Contains("23"), "balanced crf 23");
-        Expect(balanced.Contains("medium"), "balanced preset");
+        Expect(balanced.Contains("veryfast"), "balanced uses the faster encoder preset");
         Expect(balanced.Contains("aac"), "default audio aac");
+        Expect(string.Join(" ", balanced).Contains("-map 0:V:0") && !string.Join(" ", balanced).Contains("-map 0 "), "re-encoding selects the main video rather than encoding cover art as another movie");
 
         var high = BuildArguments("in.mp4", "out.mp4", 1, 5, exact: true, new ExactExportOptions(ExactQuality.High));
         Expect(high.Contains("18") && high.Contains("slow"), "high quality encoder");
@@ -346,7 +360,7 @@ static class ExportService
         Expect(exactPlan.Steps.Count == 1, "exact multi-cut is one run");
         var exactText = string.Join(" ", exactPlan.Steps[0].Arguments);
         Expect(exactText.Contains("-ss 0 -t 2 -i in.mp4 -ss 9.999 -t 1 -i in.mp4"), "exact multi-cut seeks one input to each segment");
-        Expect(graph.StartsWith("[0:v:0]setpts=PTS-STARTPTS[v0];[0:a:0]asetpts=PTS-STARTPTS[a0];[1:v:0]"), "exact multi-cut takes each segment from its own input");
+        Expect(graph.StartsWith("[0:V:0]setpts=PTS-STARTPTS[v0];[0:a:0]asetpts=PTS-STARTPTS[a0];[1:V:0]"), "exact multi-cut takes each segment from its own input");
         Expect(graph.EndsWith("concat=n=2:v=1:a=1[v][a]"), "exact joins video and audio");
         Expect(Math.Abs(exactPlan.Steps[0].Seconds - 3) < 1e-9, "exact progress covers the kept length");
         var silent = Plan("in.mp4", "out.mp4", two, 30, hasAudio: false, exact: true).Steps[0].Arguments;
@@ -370,16 +384,16 @@ static class ExportService
         var english = new SubtitleTrack(1, "subrip", "eng", null);
         var burned = BuildArguments(@"C:\clips\in.mkv", "out.mkv", 1, 5, exact: true, ExactExportOptions.Default with { BurnSubtitles = english });
         var burnGraph = burned[Array.IndexOf(burned, "-filter_complex") + 1];
-        Expect(burnGraph == @"[0:v:0]setpts=PTS+0.999/TB,subtitles=filename=C\\:/clips/in.mkv:si=1,setpts=PTS-0.999/TB[v]", "text subtitles are drawn on the source timeline");
+        Expect(burnGraph == @"[0:V:0]setpts=PTS+0.999/TB,subtitles=filename=C\\:/clips/in.mkv:si=1,setpts=PTS-0.999/TB[v]", "text subtitles are drawn on the source timeline");
         Expect(string.Join(" ", burned).Contains("-map [v] -map 0:a?") && !string.Join(" ", burned).Contains("-map 0 "), "burning in leaves the subtitle streams out");
         Expect(Array.IndexOf(burned, "-ss") < Array.IndexOf(burned, "-i"), "burned cuts seek the input too");
         var burnedAtStart = BuildArguments("in.mkv", "out.mkv", 0, 5, exact: true, ExactExportOptions.Default with { BurnSubtitles = english });
-        Expect(burnedAtStart[Array.IndexOf(burnedAtStart, "-filter_complex") + 1].StartsWith("[0:v:0]subtitles="), "a cut from the start needs no shift");
+        Expect(burnedAtStart[Array.IndexOf(burnedAtStart, "-filter_complex") + 1].StartsWith("[0:V:0]subtitles="), "a cut from the start needs no shift");
         var pgs = BuildArguments("in.mkv", "out.mkv", 1, 5, exact: true, ExactExportOptions.Default with { BurnSubtitles = new SubtitleTrack(0, "hdmv_pgs_subtitle", null, null) });
-        Expect(pgs.Contains("[0:v:0][0:s:0]overlay[v]"), "picture subtitles are overlaid");
+        Expect(pgs.Contains("[0:V:0][0:s:0]overlay[v]"), "picture subtitles are overlaid");
         var burnedConcat = Plan("in.mkv", "out.mkv", two, 30, hasAudio: true, exact: true, ExactExportOptions.Default with { BurnSubtitles = english }).Steps[0].Arguments;
         var concatGraph = burnedConcat[Array.IndexOf(burnedConcat, "-filter_complex") + 1];
-        Expect(concatGraph.StartsWith("[0:v:0]subtitles=") && concatGraph.Contains("[1:v:0]setpts=PTS+9.999/TB,subtitles=") && concatGraph.Contains("si=1,setpts=PTS-9.999/TB,setpts=PTS-STARTPTS[v1]"), "multi-cut burns each segment in on the source timeline");
+        Expect(concatGraph.StartsWith("[0:V:0]subtitles=") && concatGraph.Contains("[1:V:0]setpts=PTS+9.999/TB,subtitles=") && concatGraph.Contains("si=1,setpts=PTS-9.999/TB,setpts=PTS-STARTPTS[v1]"), "multi-cut burns each segment in on the source timeline");
         Expect(!BuildArguments("in.mkv", "out.mkv", 1, 5, exact: false).Contains("-filter_complex"), "fast copy never burns in");
 
         Expect(Remux.For("in.mkv", "out.MKV", []) is null, "the same container is not a conversion");
@@ -388,7 +402,7 @@ static class ExportService
         Expect(toMp4.Contains("-map 0:V -map 0:a? -map 0:s:1 -map 0:s:3 -c copy") && toMp4.Contains("-c:s:0 mov_text -c:s:1 mov_text"), "MP4 takes video, audio and text subtitles as mov_text, and leaves picture subtitles out");
         Expect(!toMp4.Contains("-map 0 "), "a conversion never maps every stream");
         var toMkv = string.Join(" ", BuildArguments("in.mp4", "out.mkv", 1, 5, exact: true, remux: Remux.For("in.mp4", "out.mkv", [new SubtitleTrack(0, "mov_text", null, null), mixed[1]])));
-        Expect(toMkv.Contains("-map 0:V -map 0:a? -map 0:s:0 -map 0:s:2") && toMkv.Contains("-c:s:0 srt -c:s:1 copy"), "MKV takes text subtitles as SRT and picture subtitles as they are");
+        Expect(toMkv.Contains("-map 0:V:0 -map 0:a? -map 0:s:0 -map 0:s:2") && toMkv.Contains("-c:s:0 srt -c:s:1 copy"), "MKV takes text subtitles as SRT and picture subtitles as they are");
         var burnedMp4 = string.Join(" ", BuildArguments("in.mkv", "out.mp4", 1, 5, exact: true, ExactExportOptions.Default with { BurnSubtitles = english }, Remux.For("in.mkv", "out.mp4", mixed)));
         Expect(!burnedMp4.Contains("-c:s") && !burnedMp4.Contains("0:s:3"), "a burned-in conversion carries no subtitle streams");
         var convertedParts = Plan("in.mkv", Path.Combine("C:\\clips", "out.mp4"), two, 30, hasAudio: true, exact: false, remux: Remux.For("in.mkv", "out.mp4", mixed));
@@ -396,7 +410,7 @@ static class ExportService
         var hdrOptions = ExactExportOptions.Default with { Color = new VideoColor("smpte2084", "bt2020", "bt2020nc") };
         var hdrArgs = BuildArguments("in.mkv", "out.mp4", 3600, 3604, exact: false, hdrOptions);
         var hdrText = string.Join(" ", hdrArgs);
-        Expect(hdrText.Contains("-ss 3599.999 -i in.mkv -t 4"), "HDR cuts seek directly to an hour into the source");
+        Expect(hdrText.Contains("-ss 3599.999 -t 4 -i in.mkv -t 4"), "HDR cuts bound input reads as well as output duration");
         Expect(hdrText.Contains("tonemap=") && hdrText.Contains("-color_trc bt709") && hdrText.Contains("-ac 2"), "HDR is tone mapped and labeled SDR with stereo audio even in fast mode");
         var hdrConcat = Plan("in.mkv", "out.mp4", two, 30, true, false, hdrOptions);
         Expect(hdrConcat.Steps.Count == 1 && string.Join(" ", hdrConcat.Steps[0].Arguments).Split("tonemap=").Length == 5, "every HDR segment is tone mapped before concat");
@@ -405,6 +419,12 @@ static class ExportService
         var dolbyOptions = hdrOptions with { Color = new VideoColor(null, null, null, 5), UseLibplacebo = true };
         Expect(string.Join(" ", BuildArguments("in.mkv", "out.mp4", 1, 2, false, dolbyOptions)).Contains("apply_dolbyvision=true"), "Dolby Vision uses metadata aware conversion");
         Expect(!HdrExport.CanUseCpu(dolbyOptions.Color) && HdrExport.CanUseCpu(new VideoColor(null, null, null, 8, 1)), "CPU fallback requires a compatible Dolby base layer");
+        var hd = string.Join(" ", BuildArguments("in.mkv", "out.mp4", 3600, 3604, false, hdrOptions with { Size = ExportSize.Hd1080 }));
+        Expect(hd.Contains("-vf scale=w=") && hd.IndexOf("scale=", StringComparison.Ordinal) < hd.IndexOf("tonemap=", StringComparison.Ordinal), "1080p resizing happens before expensive HDR tone mapping");
+        var hdSdr = BuildArguments("in.mkv", "out.mp4", 1, 2, false, ExactExportOptions.Default with { Size = ExportSize.Hd1080 });
+        Expect(hdSdr.Contains("libx264") && string.Join(" ", hdSdr).Contains("scale="), "resizing SDR video requires encoding even if fast mode was requested");
+        Expect(FfmpegRunner.TryParseFrameProgress("frame=249", 24000 / 1001d, out var videoTime) && Math.Abs(videoTime.TotalSeconds - 10.385375) < 0.000001, "progress follows encoded video frames");
+        Expect(!FfmpegRunner.TryParseFrameProgress("out_time=00:01:34.519000", 24, out _), "long subtitle timestamps must not drive video progress to 100 percent");
         return errors;
     }
 }

@@ -9,7 +9,7 @@ static class ExportModeCopy
         "Copies video and converts audio to stereo AAC. The cut can start slightly earlier, on a keyframe.";
 
     public const string ExactBaseExplanation =
-        "Re-encodes so the cut matches the frames you chose. Slower, and the picture can change.";
+        "Re-encodes the exact frames you chose.";
 
     public const string SubtitlesOffTitle = "Burn in subtitles";
 
@@ -19,7 +19,7 @@ static class ExportModeCopy
         "Copies each video segment with stereo AAC audio, then joins them. Every segment can start slightly earlier, on a keyframe.";
 
     public const string ExactMultiAudio =
-        "Several segments keep the first video and audio track, and audio is folded down to stereo AAC.";
+        "Stitched segments use the first audio track.";
 
     /// <summary>
     /// The one or two sentences under the export options. <paramref name="convertTo"/> names the new container when the

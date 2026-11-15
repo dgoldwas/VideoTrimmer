@@ -1,5 +1,16 @@
 # Updates
 
+## 2026-11-15 (2026.11.15.07)
+
+- **Menu bar:** **File**, **Edit** and **Help** menus in the title bar replace the **⋯** button. File has **New**, **Open video…**, **Open project…**, **Save project**, **Save project as…**, **Export…** and **Exit**; Edit has **Undo**, **Redo**, the segment commands and **Settings…**; Help has the shortcuts, updates and About. `Alt` and the underlined letters reach them from the keyboard.
+- **Undo and redo** (`Ctrl+Z`, `Ctrl+Y`) for every change to the segments.
+- **Projects:** the saved segment list from 2026.11.15.06 is now a project. **Save project** writes back to the file it came from, the title bar shows the project's name with a dot while there are unsaved changes, and VideoTrimmer asks before throwing changes away. **New** (`Ctrl+N`) closes the video.
+
+## 2026-11-15 (2026.11.15.06)
+
+- **Exports no longer fail on videos with data tracks.** An MP4 carrying a timecode or scene-description track stopped with "Conversion failed!" in both modes, because FFmpeg cannot write those tracks back. Exports that keep the container now leave data tracks out, as conversions already did.
+- **Save and import the segment list.** **Save segments…** in the ⋯ menu (`Ctrl+S`) writes the segments to a JSON file with the video's path. **Import segments…** (`Ctrl+Shift+O`, or drop the file on the window) opens that video and restores them; if the video has moved, they go onto the one that is open.
+
 ## 2026-11-15 (2026.11.15.05)
 
 - **Exact frames exports start at once.** They used to decode (and, with burn-in, draw subtitles on) everything from the start of the video up to the cut before writing anything, so a cut half an hour in sat at 0% for a long time. They now seek straight to the cut and still land on the chosen frame, and the progress bar moves from the start. Exports of several segments do the same, one seek per segment.

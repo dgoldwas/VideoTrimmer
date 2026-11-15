@@ -86,12 +86,13 @@ static class ExportService
 
     /// <summary>
     /// Which streams go into the output and how its subtitles are written. Keeping the container keeps everything
-    /// (<c>-map 0</c>). Changing it keeps the video, the audio, and the subtitle tracks the new container can hold:
+    /// but the data tracks (timecode, scene descriptions), which FFmpeg cannot write back and which fail the whole
+    /// export. Changing it keeps the video, the audio, and the subtitle tracks the new container can hold:
     /// MP4 and MOV take text subtitles as mov_text and no picture subtitles; MKV takes text as SRT and pictures as they are.
     /// </summary>
     static (string[] Maps, string[] SubtitleCodecs) Streams(Remux? remux)
     {
-        if (remux is not { } target) return (["-map", "0"], []);
+        if (remux is not { } target) return (["-map", "0", "-map", "-0:d"], []);
         var maps = new List<string> { "-map", "0:V", "-map", "0:a?" };
         var codecs = new List<string>();
         var kept = 0;
@@ -306,6 +307,7 @@ static class ExportService
         var fast = BuildArguments("in.mp4", "out.mp4", 1, 5, exact: false);
         Expect(fast.Contains("-c") && fast.Contains("copy"), "fast copy keeps stream copy");
         Expect(!fast.Contains("-crf"), "fast copy has no crf");
+        Expect(string.Join(" ", fast).Contains("-map 0 -map -0:d"), "data tracks are left out");
 
         var balanced = BuildArguments("in.mp4", "out.mp4", 1, 5, exact: true, ExactExportOptions.Default);
         Expect(balanced.Contains("-crf") && balanced.Contains("23"), "balanced crf 23");

@@ -15,7 +15,7 @@ A small Windows desktop app for cutting a video down to the parts you want to ke
 - Exact mode offers High / Balanced / Small quality presets and an optional copy-audio setting.
 - When the source has subtitle tracks, Exact mode can burn one into the picture. Text subtitles (SRT, ASS, mov_text, WebVTT) are drawn with libass, using any fonts the file carries; picture subtitles (Blu-ray PGS, DVD, DVB) are overlaid. The burned file leaves out the subtitle streams so they do not show twice.
 - Preserve mapped streams in fast-copy mode (`-map 0`), including audio and subtitles supported by the selected output container.
-- **Settings** (**⋯** menu or `Ctrl+,`): a light or dark theme and one of seven accent colors, the same set as WB Tunes. Choices show at once; **Cancel** puts the saved look back. They are kept in `%LOCALAPPDATA%\VideoTrimmer\settings.json`.
+- **Settings** (**Edit** menu or `Ctrl+,`): a light or dark theme and one of seven accent colors, the same set as WB Tunes. Choices show at once; **Cancel** puts the saved look back. They are kept in `%LOCALAPPDATA%\VideoTrimmer\settings.json`.
 - Installs to `C:\Program Files\WarmButter\VideoTrimmer` and updates itself from this repository's GitHub releases.
 
 ## Controls
@@ -26,6 +26,8 @@ A small Windows desktop app for cutting a video down to the parts you want to ke
 - The mouse wheel steps one frame while the pointer is over the preview or the filmstrip.
 - `S` (or **Split** in the dock under the preview) splits the segment under the playhead. `N` (or **New segment**) starts a new segment at the playhead that runs to the next kept segment or the end. `Delete` removes the selected segment. **Reset** keeps the whole video again. `F1` lists every shortcut.
 - Click a segment in the sidebar, or click inside another segment on the filmstrip, to make it the one the handles edit.
+- The **File**, **Edit** and **Help** menus sit in the title bar (`Alt` reaches them from the keyboard). **Edit → Undo** (`Ctrl+Z`) and **Redo** (`Ctrl+Y`) step through changes to the segments: trims, splits, new and removed segments, merges, Reset.
+- A **project** is a video's segment list. **File → Save project** (`Ctrl+S`) writes it to a JSON file with the video's path and each segment's in and out frame; **Save project as…** (`Ctrl+Shift+S`) picks a new file. **Open project…** (`Ctrl+Shift+O`, or drop the file on the window) opens that video and restores the segments; if the video has moved, they go onto the one that is open. **New** (`Ctrl+N`) closes the video for a fresh start. A dot after the name in the title bar means unsaved changes, and VideoTrimmer asks before New, opening something else, or closing throws them away.
 - To export only some segments, select several in the sidebar: `Ctrl`+click adds or removes one, `Shift`+click selects a range, and `Ctrl+A` selects all. Selected rows show a ✓ and the button changes to **Export N selected…**. Export then saves just those, stitched or as separate files. A plain click or `Esc` goes back to a single selection, and then Export uses every segment again. A segment's `×` removes it. Dragging a segment into another one merges them when you let go.
 - `Space` (or a click on the preview) plays and pauses the edit from the playhead. A playhead inside a cut starts at the next kept frame. `,` and `.` jump to the previous and next cut. While playing they skip between joins; while paused they also stop at each segment's out point.
 - `Ctrl`+wheel zooms the timeline around the pointer. `+`, `-` and `0` zoom in, zoom out and fit the selection to the timeline (`0` again shows the whole video). A tilt wheel or sideways touchpad swipe pans. Dragging a handle past the edge of a zoomed view scrolls it.
@@ -36,7 +38,7 @@ To remove an ad break, for example: put the playhead where it starts and press `
 
 Run `VideoTrimmer-<version>-Setup.exe` from the [latest release](https://github.com/dgoldwas/VideoTrimmer/releases). It installs to `C:\Program Files\WarmButter\VideoTrimmer` with a bundled FFmpeg, adds a Start menu entry, and offers VideoTrimmer in Explorer's **Open with** menu for common video types.
 
-Open the **⋯** menu at the top right and choose **Check for updates** to check GitHub for a newer release. VideoTrimmer also checks shortly after it starts and every six hours. When an update exists, the **⋯** button gets a dot and the menu item changes to **Update to …**. Choose whether to download the installer, check it against GitHub's SHA-256, close VideoTrimmer, install through a Windows permission prompt, and reopen with the same video. **About VideoTrimmer** in the same menu shows the running version.
+Choose **Help → Check for updates** to check GitHub for a newer release. VideoTrimmer also checks shortly after it starts and every six hours. When an update exists, **Help** gets a dot and the menu item changes to **Update to …**. Choose whether to download the installer, check it against GitHub's SHA-256, close VideoTrimmer, install through a Windows permission prompt, and reopen with the same video. **About VideoTrimmer** in the same menu shows the running version.
 
 The check reads this public repository's releases anonymously. When `VIDEOTRIMMER_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` or a GitHub CLI sign-in is available it is used too, which raises GitHub's rate limit.
 
@@ -68,7 +70,7 @@ The project's `<Version>` (YYYY.MM.DD.##) is the only place the version is set. 
 .\build-installer.ps1 -Release   # ...and publish it as GitHub release v<version>, which installed copies pick up
 ```
 
-`VideoTrimmer.exe --render <folder>` makes a short test clip and saves pictures of the window in its main states (empty, loaded, trimmed, Exact mode, zoomed, exporting), the ⋯ menu, the shortcuts sheet and Settings, then the light theme, for checking the UI without clicking through it.
+`VideoTrimmer.exe --render <folder>` makes a short test clip and saves pictures of the window in its main states (empty, loaded, trimmed, Exact mode, zoomed, exporting), the title bar, the File and Edit menus, the shortcuts sheet and Settings, then the light theme, for checking the UI without clicking through it.
 
 `build.ps1` runs the `--check` self-test on the published exe and bundles a pinned, checksum-verified GPL FFmpeg build from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) into `tools\`. Exact-frame export needs libx264, which LGPL builds leave out. The installer needs [Inno Setup 6](https://jrsoftware.org/isinfo.php). The icon comes from `assets\make-icon.ps1`.
 

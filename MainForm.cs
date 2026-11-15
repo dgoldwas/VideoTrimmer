@@ -137,7 +137,7 @@ public sealed partial class MainForm : Form
         Controls.AddRange([topBar, drop, previewHost, transport, timeline, side]);
 
         topBar.Open.Click += (_, _) => Browse();
-        topBar.More.Click += (_, _) => ShowMoreMenu();
+        WireMenus();
         WireCaptionButtons();
         timeline.ValuesChanged += (_, _) => OnTimelineChanged();
         timeline.InteractionEnded += (_, _) => OnTimelineInteractionEnded();
@@ -231,7 +231,7 @@ public sealed partial class MainForm : Form
         base.OnShown(e);
         LayoutChrome();
         if (!string.IsNullOrWhiteSpace(startupPath))
-            LoadVideo(startupPath);
+            OpenPath(startupPath);
     }
 
     protected override void OnResize(EventArgs e)
@@ -278,6 +278,12 @@ public sealed partial class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        if (e.CloseReason != CloseReason.WindowsShutDown && !ConfirmDiscard())
+        {
+            e.Cancel = true;
+            return;
+        }
+
         StopPlayback();
         TryCancel(loadCts);
         TryCancel(previewCts);
@@ -338,6 +344,8 @@ public sealed partial class MainForm : Form
             if (!exporting) Browse();
             return true;
         }
+
+        if (MenuShortcut(keyData)) return true;
 
         if (keyData == Keys.Escape && exporting)
         {
@@ -517,8 +525,8 @@ public sealed partial class MainForm : Form
     void OnDragDrop(object? sender, DragEventArgs e)
     {
         if (exporting) return;
-        if (e.Data?.GetData(DataFormats.FileDrop) is string[] paths && paths.Length > 0)
-            LoadVideo(paths[0]);
+        if (e.Data?.GetData(DataFormats.FileDrop) is string[] paths && paths.Length > 0 && ConfirmDiscard())
+            OpenPath(paths[0]);
     }
 
     void OnWheel(object? sender, MouseEventArgs e)
@@ -530,7 +538,7 @@ public sealed partial class MainForm : Form
 
     void Browse()
     {
-        if (exporting) return;
+        if (exporting || !ConfirmDiscard()) return;
         using var dialog = new OpenFileDialog { Filter = VideoFilter };
         if (input is not null)
         {
@@ -543,7 +551,7 @@ public sealed partial class MainForm : Form
             LoadVideo(dialog.FileName);
     }
 
-    async void LoadVideo(string path)
+    async void LoadVideo(string path, PendingProject? project = null)
     {
         if (exporting)
         {
@@ -574,6 +582,7 @@ public sealed partial class MainForm : Form
             var media = await MediaProbe.ProbeAsync(runner, path, token);
             if (generation != loadGeneration || IsDisposed) return;
             ApplyMedia(path, media);
+            if (project is not null) ApplyProject(project);
         }
         catch (OperationCanceledException)
         {
@@ -600,8 +609,9 @@ public sealed partial class MainForm : Form
         ClearPictures();
         timeline.Locked = false;
         timeline.SetClip(media.Duration, media.Fps, media.Frames);
-        topBar.FileName.Text = Path.GetFileName(path);
-        tips.SetToolTip(topBar.FileName, path);
+        projectPath = null;
+        history.Reset(timeline.State);
+        ShowTitle();
         topBar.Meta.Text = string.Format(CultureInfo.CurrentCulture, "{0}  ·  {1:0.###} fps  ·  {2:N0} frames{3}{4}",
             TimeMath.Format(media.Frames, media.Fps), media.Fps, media.Frames, media.HasAudio ? "" : "  ·  no audio",
             media.Subtitles.Count switch { 0 => "", 1 => "  ·  1 subtitle track", var n => $"  ·  {n} subtitle tracks" });
@@ -624,6 +634,7 @@ public sealed partial class MainForm : Form
     {
         // Skip text-box churn while dragging; InteractionEnded writes the final values.
         if (!syncing && !timeline.IsDragging) WriteBoxes();
+        if (!timeline.IsDragging) TrackEdit();
         UpdateReadouts();
         SchedulePreview(false);
         QueueAnchor();
@@ -632,6 +643,7 @@ public sealed partial class MainForm : Form
     void OnTimelineInteractionEnded()
     {
         if (!syncing) WriteBoxes();
+        TrackEdit();
         SchedulePreview(accurate: true);
     }
 

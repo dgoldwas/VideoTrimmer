@@ -1,7 +1,7 @@
 namespace VideoTrimmer;
 
 /// <summary>
-/// <c>--render &lt;folder&gt;</c>: makes a short test clip, opens it, and saves pictures of the window in its main states,
+/// <c>--render &lt;folder&gt;</c>: makes a short test clip, opens it, and saves pictures of the window and its menus in its main states,
 /// so the UI can be looked at the same way every time without sending keys or clicks to the desktop. The pictures are
 /// taken at the display scale of the monitor the window opens on, in the dark theme and then the light one.
 /// </summary>
@@ -27,6 +27,7 @@ public sealed partial class MainForm
             }
             finally
             {
+                form.skipSavePrompt = true;
                 form.Close();
             }
         };
@@ -50,13 +51,15 @@ public sealed partial class MainForm
 
         await Task.Delay(300);
         Save(this, folder, "1-empty");
-        Save(Popup(MoreMenu()), folder, "1-more-menu", close: true);
+        Save(Popup(topBar.FileMenu), folder, "1-file-menu", close: true);
 
         LoadVideo(clip);
         await Until(() => timeline.HasMedia && preview.Image is not null && filmstrip.Current is not null && filmstrip.Building is null);
         // The backdrop takes its tint once the still settles.
         await Task.Delay(800);
         Save(this, folder, "2-loaded");
+        // The window picture shows the classic frame over the top bar, so the bar is saved on its own too.
+        Save(topBar, folder, "2-title-bar");
 
         // A trimmed segment shows its own thumbnails pinned to the handles.
         timeline.SetInFrame(120, followPlayhead: true);
@@ -64,6 +67,7 @@ public sealed partial class MainForm
         await Until(() => anchorStrip is not null);
         await Task.Delay(400);
         Save(this, folder, "3-trimmed");
+        Save(Popup(topBar.EditMenu), folder, "3-edit-menu", close: true);
 
         ChooseExact(true);
         await Task.Delay(200);
@@ -112,13 +116,13 @@ public sealed partial class MainForm
         await Task.Delay(300);
         Save(light, folder, "9-light-settings");
         light.Close();
-        Save(Popup(MoreMenu()), folder, "9-light-menu", close: true);
+        Save(Popup(topBar.FileMenu), folder, "9-light-menu", close: true);
     }
 
-    ContextMenuStrip Popup(ContextMenuStrip menu)
+    static ToolStripDropDown Popup(ToolStripMenuItem menu)
     {
-        menu.Show(this, new Point(ClientSize.Width / 2, ClientSize.Height / 3));
-        return menu;
+        menu.ShowDropDown();
+        return menu.DropDown;
     }
 
     static async Task Until(Func<bool> done)
@@ -136,10 +140,8 @@ public sealed partial class MainForm
         using var bitmap = new Bitmap(control.Width, control.Height);
         control.DrawToBitmap(bitmap, new Rectangle(Point.Empty, control.Size));
         bitmap.Save(Path.Combine(folder, name + ".png"), System.Drawing.Imaging.ImageFormat.Png);
+        // The menu bar keeps its drop-downs, so they are only closed.
         if (close && control is ToolStripDropDown menu)
-        {
             menu.Close();
-            menu.Dispose();
-        }
     }
 }

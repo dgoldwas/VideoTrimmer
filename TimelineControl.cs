@@ -539,6 +539,36 @@ sealed class TimelineControl : Control
         NotifyValues();
     }
 
+    public SegmentState State => new(AllSegments, ActiveIndex);
+
+    /// <summary>
+    /// Replaces every segment, as when a project is opened or an edit is undone. Segment <paramref name="active"/> (in time
+    /// order) becomes the one being edited; unless <paramref name="movePlayhead"/> is false the playhead goes to its start.
+    /// </summary>
+    public bool SetSegments(IEnumerable<Segment> segments, int active = 0, bool movePlayhead = true)
+    {
+        if (!HasMedia || Locked) return false;
+        drag = DragKind.None;
+        var kept = new List<Segment>();
+        foreach (var segment in segments.OrderBy(s => s.In))
+        {
+            // An overlap is trimmed off the later segment; touching ones stay separate.
+            var start = Math.Clamp(Math.Max(segment.In, kept.Count > 0 ? kept[^1].Out : 0), 0, totalFrames);
+            var end = Math.Clamp(segment.Out, 0, totalFrames);
+            if (end > start) kept.Add(new Segment(start, end));
+        }
+
+        if (kept.Count == 0) return false;
+        others.Clear();
+        picked.Clear();
+        var editing = kept[Math.Clamp(active, 0, kept.Count - 1)];
+        others.AddRange(kept.Where(s => s != editing));
+        (inFrame, outFrame) = (editing.In, editing.Out);
+        if (movePlayhead) playhead = inFrame;
+        NotifyValues();
+        return true;
+    }
+
     public int FramesInOneSecond() => TimeMath.RoundedFps(fps);
 
     /// <summary>Magnifies by <paramref name="factor"/>, keeping <paramref name="anchor"/> where it is on screen.</summary>

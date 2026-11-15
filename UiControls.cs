@@ -797,17 +797,22 @@ sealed class DropPrompt : GlassControl
 enum StatusKind { Info, Busy, Good, Error }
 
 /// <summary>
-/// The window's title bar: the file and its details on the left, the status in the middle, Open and the ⋯ menu, then
-/// minimize, maximize and close on the right. It replaces the native caption, the old toolbar and the status bar.
-/// Its empty parts and its labels drag the window.
+/// The window's title bar: the File, Edit and Help menus and the file and its details on the left, the status in the
+/// middle, Open, then minimize, maximize and close on the right. It replaces the native caption, the old toolbar and
+/// the status bar. Its empty parts and its labels drag the window.
 /// </summary>
 sealed class TopBar : GlassControl
 {
+    public MenuStrip Menu { get; }
+    public ToolStripMenuItem FileMenu { get; }
+    public ToolStripMenuItem EditMenu { get; }
+    public ToolStripMenuItem HelpMenu { get; }
+    /// <summary>A dot on Help: an update is waiting there.</summary>
+    public bool HelpDot { get; set; }
     public GlassLabel FileName { get; }
     public GlassLabel Meta { get; }
     public GlassLabel Status { get; }
     public GlassButton Open { get; }
-    public GlassButton More { get; }
     public GlassButton Minimize { get; }
     public GlassButton Maximize { get; }
     public GlassButton Close { get; }
@@ -821,13 +826,23 @@ sealed class TopBar : GlassControl
         Meta = new GlassLabel { ForeColor = Theme.Muted, Font = Theme.Ui(9), AccessibleName = "Video details" };
         Status = new GlassLabel { ForeColor = Theme.Muted, Font = Theme.Ui(9), Align = ContentAlignment.MiddleRight, AccessibleName = "Status" };
         Open = new GlassButton { Text = "Open", AccessibleName = "Open a video" };
-        More = new GlassButton { Kind = ButtonKind.Quiet, Icon = Icon.More, AccessibleName = "More: shortcuts, updates, about" };
+        FileMenu = Menus.Top("&File");
+        EditMenu = Menus.Top("&Edit");
+        HelpMenu = Menus.Top("&Help");
+        HelpMenu.Paint += (_, e) =>
+        {
+            if (!HelpDot) return;
+            using var dot = new SolidBrush(Theme.Accent);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.FillEllipse(dot, HelpMenu.Width - S(9), S(9), S(6), S(6));
+        };
+        Menu = Menus.Bar(FileMenu, EditMenu, HelpMenu);
         Minimize = Caption(Icon.Minimize, "Minimize");
         Maximize = Caption(Icon.Maximize, "Maximize");
         Maximize.PartOfCaption = true;
         Close = Caption(Icon.Close, "Close");
         Close.HoverFill = Color.FromArgb(196, 43, 28);
-        Controls.AddRange([FileName, Meta, Status, Open, More, Minimize, Maximize, Close]);
+        Controls.AddRange([Menu, FileName, Meta, Status, Open, Minimize, Maximize, Close]);
         PartOfCaption = true;
         foreach (var label in new[] { FileName, Meta, Status })
             WindowChrome.ActAsCaption(label);
@@ -867,11 +882,12 @@ sealed class TopBar : GlassControl
         Close.SetBounds(ClientSize.Width - S(6) - caption, y, caption, height);
         Maximize.SetBounds(Close.Left - S(2) - caption, y, caption, height);
         Minimize.SetBounds(Maximize.Left - S(2) - caption, y, caption, height);
-        More.SetBounds(Minimize.Left - S(14) - S(34), y, S(34), height);
         var openWidth = Open.PreferredWidth();
-        Open.SetBounds(More.Left - S(6) - openWidth, y, openWidth, height);
+        Open.SetBounds(Minimize.Left - S(14) - openWidth, y, openWidth, height);
 
-        var left = pad + S(18) + S(10);
+        var menuLeft = pad + S(18) + S(4);
+        Menu.SetBounds(menuLeft, y, Menu.GetPreferredSize(Size.Empty).Width, height);
+        var left = Menu.Right + S(10);
         var room = Math.Max(S(40), Open.Left - S(14) - left);
         var statusWidth = Math.Min(Status.MeasureWidth() + S(2), Math.Max(S(60), room * 45 / 100));
         Status.SetBounds(Open.Left - S(14) - statusWidth, 0, statusWidth, ClientSize.Height - 1);
@@ -1677,6 +1693,91 @@ static class Menus
 
     public static ToolStripSeparator Separator() => new() { ForeColor = Theme.MenuBorder };
 
+    /// <summary>The title bar's menu bar: plain text on the glass, with Alt and the underlined letters to reach it.</summary>
+    public static MenuStrip Bar(params ToolStripMenuItem[] menus)
+    {
+        var bar = new MenuStrip
+        {
+            Renderer = new BarRenderer(),
+            BackColor = Color.Transparent,
+            Font = Theme.Ui(9.5f),
+            GripStyle = ToolStripGripStyle.Hidden,
+            Padding = Padding.Empty,
+            AutoSize = false,
+            Dock = DockStyle.None,
+            CanOverflow = false,
+            Stretch = false,
+            AccessibleName = "Menu bar",
+        };
+        bar.Items.AddRange(menus);
+        return bar;
+    }
+
+    public static ToolStripMenuItem Top(string text)
+    {
+        var item = new ToolStripMenuItem(text) { Padding = new Padding(7, 0, 7, 0) };
+        var menu = (ToolStripDropDownMenu)item.DropDown;
+        menu.ShowImageMargin = false;
+        menu.ShowCheckMargin = true;
+        menu.Font = Theme.Ui(9.5f);
+        // Without an item the menu never opens, so there is never a chance to fill it.
+        item.DropDownItems.Add(Separator());
+        return item;
+    }
+
+    /// <summary>Replaces the items of <paramref name="menu"/>, built fresh each time it opens so they show the current state.</summary>
+    public static void Fill(ToolStripMenuItem menu, IEnumerable<ToolStripItem> items)
+    {
+        var old = menu.DropDownItems.Cast<ToolStripItem>().ToList();
+        menu.DropDownItems.Clear();
+        foreach (var item in old) item.Dispose();
+        menu.DropDownItems.AddRange(items.ToArray());
+    }
+
+    sealed class BarRenderer() : ToolStripProfessionalRenderer(new MenuColors())
+    {
+        protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+        {
+            if (e.ToolStrip is not MenuStrip) base.OnRenderToolStripBackground(e);
+        }
+
+        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+        {
+            if (e.ToolStrip is not MenuStrip) base.OnRenderToolStripBorder(e);
+        }
+
+        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+        {
+            if (e.Item.IsOnDropDown)
+            {
+                base.OnRenderMenuItemBackground(e);
+                return;
+            }
+
+            if (!e.Item.Selected && !e.Item.Pressed) return;
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            var bounds = new Rectangle(Point.Empty, e.Item.Size);
+            bounds.Inflate(0, -2);
+            using var path = PaintUtil.Rounded(bounds, 6);
+            using var fill = new SolidBrush(e.Item.Pressed ? Theme.ControlPressed : Theme.ControlHover);
+            g.FillPath(fill, path);
+        }
+
+        // Colors are read when drawn, so the menus follow a switch of theme.
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            e.TextColor = e.Item.Enabled ? Theme.Text : Theme.Faint;
+            base.OnRenderItemText(e);
+        }
+
+        protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
+        {
+            e.ArrowColor = Theme.Muted;
+            base.OnRenderArrow(e);
+        }
+    }
+
     /// <summary>Opens the menu under <paramref name="anchor"/> and frees it once it closes.</summary>
     public static void ShowBelow(ContextMenuStrip menu, Control anchor, bool alignRight = false)
     {
@@ -1707,7 +1808,7 @@ static class Menus
     }
 }
 
-/// <summary>Every keyboard and mouse shortcut on one sheet, opened from the ⋯ menu or with F1.</summary>
+/// <summary>Every keyboard and mouse shortcut on one sheet, opened from the Help menu or with F1.</summary>
 sealed class ShortcutsDialog : Form
 {
     static readonly (string Keys, string Does)[] Rows =
@@ -1726,7 +1827,11 @@ sealed class ShortcutsDialog : Form
         ("+,  −,  0", "Zoom in, zoom out, fit"),
         ("Ctrl+wheel", "Zoom the timeline at the pointer"),
         ("Shift+click, Alt+click", "Set in or out on the timeline"),
-        ("Ctrl+O", "Open a video"),
+        ("Ctrl+Z,  Ctrl+Y", "Undo and redo a change to the segments"),
+        ("Ctrl+N", "New: close the video and start over"),
+        ("Ctrl+O,  Ctrl+Shift+O", "Open a video, open a project"),
+        ("Ctrl+S,  Ctrl+Shift+S", "Save the project, save it as"),
+        ("Ctrl+E", "Export"),
         ("Ctrl+,", "Settings: theme and accent color"),
         ("F1", "Show this sheet"),
     ];

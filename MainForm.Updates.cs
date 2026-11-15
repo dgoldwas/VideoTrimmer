@@ -1,6 +1,6 @@
 namespace VideoTrimmer;
 
-// The ⋯ menu offers a manual check; its item changes to "Update to …", and the button gets a dot, when a release is available.
+// The Help menu offers a manual check; its item changes to "Update to …", and Help gets a dot, when a release is available.
 public sealed partial class MainForm
 {
     readonly System.Windows.Forms.Timer updateTimer = new() { Interval = (int)TimeSpan.FromHours(6).TotalMilliseconds };
@@ -40,25 +40,8 @@ public sealed partial class MainForm
     void ShowVersion()
     {
         updateLabel = availableUpdate is { } found ? $"Update to {found.Version}" : "Check for updates";
-        topBar.More.Dot = availableUpdate is not null;
-        topBar.More.Invalidate();
-        tips.SetToolTip(topBar.More, availableUpdate is { } update
-            ? $"VideoTrimmer {update.Version} is available (you have {UpdateService.CurrentVersion})"
-            : "Shortcuts, updates and About");
-    }
-
-    void ShowMoreMenu() => Menus.ShowBelow(MoreMenu(), topBar.More, alignRight: true);
-
-    ContextMenuStrip MoreMenu()
-    {
-        var menu = Menus.Create();
-        menu.Items.Add(Menus.Item("Open video…", false, Browse, "Ctrl+O", enabled: !exporting));
-        menu.Items.Add(Menus.Item("Keyboard shortcuts", false, ShowShortcuts, "F1"));
-        menu.Items.Add(Menus.Item("Settings…", false, ShowSettings, "Ctrl+,"));
-        menu.Items.Add(Menus.Separator());
-        menu.Items.Add(Menus.Item(updateLabel, false, OnUpdateClick, enabled: !updateBusy));
-        menu.Items.Add(Menus.Item("About VideoTrimmer", false, ShowAbout, UpdateService.CurrentVersion));
-        return menu;
+        topBar.HelpDot = availableUpdate is not null;
+        topBar.HelpMenu.Invalidate();
     }
 
     void ShowAbout()
@@ -83,7 +66,7 @@ public sealed partial class MainForm
                 SetStatus($"VideoTrimmer is up to date (version {UpdateService.CurrentVersion}).", StatusKind.Good);
             // A release found in the background is only announced once, and never over an export or playback.
             else if (!manual && availableUpdate is { } found && known != updateLabel && !exporting && !player.IsPlaying)
-                SetStatus($"VideoTrimmer {found.Version} is available. Open the ⋯ menu to update.", StatusKind.Info);
+                SetStatus($"VideoTrimmer {found.Version} is available. Open the Help menu to update.", StatusKind.Info);
         }
         catch (OperationCanceledException) when (updateLifetime.IsCancellationRequested) { }
         catch (Exception ex)

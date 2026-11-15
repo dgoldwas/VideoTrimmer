@@ -5,10 +5,11 @@ A small Windows desktop app for cutting a video down to the parts you want to ke
 ## Features
 
 - Open a video by browsing, drag and drop, or Explorer's **Open with** menu.
-- Scrub a filmstrip. Drag the in and out handles, or type a timecode and a frame number together.
-- **Zoom** the timeline to work frame by frame in long videos. When zoomed, an overview bar shows the whole clip; drag it to pan.
+- Scrub a filmstrip. Drag the in and out handles, or type a timecode and a frame number together. Thumbnails keep the video's shape, and the selected segment's own thumbnails run from its in frame to its out frame.
+- **Zoom** the timeline to work frame by frame in long videos. When zoomed, an overview bar shows the whole clip; drag its thumb to pan, or click the bar to jump. The thumb never shrinks below a grabbable size.
 - **Multi-cut:** keep several segments of one video. On export, choose whether to stitch them into one file or save each segment as its own numbered file (`name_01`, `name_02`, …). Split a segment at the playhead, start a new one, or delete one. Everything outside the kept segments is hatched out.
-- **Segments sidebar:** every segment is listed with its in, out, length and where it lands in the export. Click one to edit it in the selected-segment panel below the list.
+- **Segments sidebar:** every segment is listed with its in, out, length and where it lands in the export. Click one to edit its in and out below the list.
+- **Output format:** save in the source's container, or as MP4, MKV or MOV. Fast copy rewraps the streams, which works when their codecs fit the new container; Exact frames re-encodes.
 - **Play the edit:** play/pause plays the kept segments back to back with sound, the way the export will join them. ⏮ and ⏭ skip between cuts.
 - Export a fast stream copy, or re-encode for exact frames. Fast copy can start slightly early, on a keyframe.
 - Exact mode offers High / Balanced / Small quality presets and an optional copy-audio setting.
@@ -22,8 +23,8 @@ A small Windows desktop app for cutting a video down to the parts you want to ke
 - Shift-click sets the in point. Alt-click sets the out point so the current frame is included.
 - `I` and `O` do the same at the playhead. Left and Right step one frame. Shift plus an arrow steps one second. Home and End jump to the selection edges. `[` and `]` nudge the edge nearest the playhead.
 - The mouse wheel steps one frame while the pointer is over the preview or the filmstrip.
-- `S` splits the segment under the playhead. `N` starts a new segment at the playhead that runs to the next kept segment or the end. `Delete` removes the selected segment. **Reset** keeps the whole video again.
-- Click a segment in the sidebar, or click inside a dashed segment on the filmstrip, to make it the one the handles edit.
+- `S` (or **Split** in the dock under the preview) splits the segment under the playhead. `N` (or **New segment**) starts a new segment at the playhead that runs to the next kept segment or the end. `Delete` removes the selected segment. **Reset** keeps the whole video again. `F1` lists every shortcut.
+- Click a segment in the sidebar, or click inside another segment on the filmstrip, to make it the one the handles edit.
 - To export only some segments, select several in the sidebar: `Ctrl`+click adds or removes one, `Shift`+click selects a range, and `Ctrl+A` selects all. Selected rows show a ✓ and the button changes to **Export N selected…**. Export then saves just those, stitched or as separate files. A plain click or `Esc` goes back to a single selection, and then Export uses every segment again. A segment's `×` removes it. Dragging a segment into another one merges them when you let go.
 - `Space` (or a click on the preview) plays and pauses the edit from the playhead. A playhead inside a cut starts at the next kept frame. `,` and `.` jump to the previous and next cut. While playing they skip between joins; while paused they also stop at each segment's out point.
 - `Ctrl`+wheel zooms the timeline around the pointer. `+`, `-` and `0` zoom in, zoom out and fit. A tilt wheel or sideways touchpad swipe pans. Dragging a handle past the edge of a zoomed view scrolls it.
@@ -34,7 +35,7 @@ To remove an ad break, for example: put the playhead where it starts and press `
 
 Run `VideoTrimmer-<version>-Setup.exe` from the [latest release](https://github.com/dgoldwas/VideoTrimmer/releases). It installs to `C:\Program Files\WarmButter\VideoTrimmer` with a bundled FFmpeg, adds a Start menu entry, and offers VideoTrimmer in Explorer's **Open with** menu for common video types.
 
-Click **Check for updates** at the right of the status bar to check GitHub for a newer release. VideoTrimmer also checks shortly after it starts and every six hours. When an update exists, the button changes to **Update to …**. Choose whether to download the installer, check it against GitHub's SHA-256, close VideoTrimmer, install through a Windows permission prompt, and reopen with the same video. Hover over the check button to see the running version.
+Open the **⋯** menu at the top right and choose **Check for updates** to check GitHub for a newer release. VideoTrimmer also checks shortly after it starts and every six hours. When an update exists, the **⋯** button gets a dot and the menu item changes to **Update to …**. Choose whether to download the installer, check it against GitHub's SHA-256, close VideoTrimmer, install through a Windows permission prompt, and reopen with the same video. **About VideoTrimmer** in the same menu shows the running version.
 
 The check reads this public repository's releases anonymously. When `VIDEOTRIMMER_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` or a GitHub CLI sign-in is available it is used too, which raises GitHub's rate limit.
 
@@ -79,7 +80,8 @@ The audio waveform under the filmstrip is turned off for now (`WaveformEnabled` 
 ## Repository contents
 
 - `MainForm.cs`, `Program.cs`, and `VideoTrimmer.csproj`: application entry, main window, and project definition.
-- `Theme.cs`, `UiControls.cs`, `TimelineControl.cs`, `ExportModeCopy.cs`, `ExactExportOptions.cs`: dark theme, custom controls, filmstrip timeline, and export-mode copy/presets.
+- `Theme.cs`, `Glass.cs`, `UiControls.cs`, `TimelineControl.cs`: colors and fonts, the frame-tinted backdrop and glass painting, custom controls, and the filmstrip timeline.
+- `ExportModeCopy.cs`, `ExactExportOptions.cs`, `OutputFormat.cs`: export-mode copy, presets, and output containers.
 - `TimeMath.cs`, `FfmpegRunner.cs`, `MediaProbe.cs`, `StillCapture.cs`, `FilmstripService.cs`, `ExportService.cs`: frame math, FFmpeg helpers, probe, stills, filmstrip, and export plans.
 - `CutList.cs`, `AudioWaveform.cs`, `EditPlayer.cs`: multi-cut segments, the waveform, and playback of the edit.
 - `UpdateService.cs`, `MainForm.Updates.cs`: GitHub release checks and the self-update flow.

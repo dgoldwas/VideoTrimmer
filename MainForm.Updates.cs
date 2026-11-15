@@ -1,6 +1,6 @@
 namespace VideoTrimmer;
 
-// The status bar offers a manual check and changes to "Update to …" when a release is available.
+// The ⋯ menu offers a manual check; its item changes to "Update to …", and the button gets a dot, when a release is available.
 public sealed partial class MainForm
 {
     readonly System.Windows.Forms.Timer updateTimer = new() { Interval = (int)TimeSpan.FromHours(6).TotalMilliseconds };
@@ -9,11 +9,11 @@ public sealed partial class MainForm
     string? pendingUpdateSetup;
     string? pendingUpdateVersion;
     bool updateBusy;
+    string updateLabel = "Check for updates";
 
     void StartUpdateChecks()
     {
         ShowVersion();
-        statusBar.UpdateButton.Click += (_, _) => OnUpdateClick();
         if (UpdateService.TakeLastResult() is { } result)
         {
             if (result.StartsWith("failed", StringComparison.OrdinalIgnoreCase))
@@ -39,23 +39,30 @@ public sealed partial class MainForm
 
     void ShowVersion()
     {
-        var update = statusBar.UpdateButton;
-        if (availableUpdate is { } found)
-        {
-            update.Text = $"Update to {found.Version}";
-            update.Primary = true;
-            tips.SetToolTip(update, $"VideoTrimmer {found.Version} is available (you have {UpdateService.CurrentVersion}). Click to download and install it.");
-        }
-        else
-        {
-            update.Text = "Check for updates";
-            update.Primary = false;
-            tips.SetToolTip(update, $"VideoTrimmer {UpdateService.CurrentVersion}: check for updates");
-        }
+        updateLabel = availableUpdate is { } found ? $"Update to {found.Version}" : "Check for updates";
+        topBar.More.Dot = availableUpdate is not null;
+        topBar.More.Invalidate();
+        tips.SetToolTip(topBar.More, availableUpdate is { } update
+            ? $"VideoTrimmer {update.Version} is available (you have {UpdateService.CurrentVersion})"
+            : "Shortcuts, updates and About");
+    }
 
-        update.AccessibleName = update.Text;
-        update.Invalidate();
-        statusBar.PerformLayout();
+    void ShowMoreMenu()
+    {
+        var menu = Menus.Create();
+        menu.Items.Add(Menus.Item("Open video…", false, Browse, "Ctrl+O", enabled: !exporting));
+        menu.Items.Add(Menus.Item("Keyboard shortcuts", false, ShowShortcuts, "F1"));
+        menu.Items.Add(Menus.Separator());
+        menu.Items.Add(Menus.Item(updateLabel, false, OnUpdateClick, enabled: !updateBusy));
+        menu.Items.Add(Menus.Item("About VideoTrimmer", false, ShowAbout, UpdateService.CurrentVersion));
+        Menus.ShowBelow(menu, topBar.More, alignRight: true);
+    }
+
+    void ShowAbout()
+    {
+        MessageBox.Show(this,
+            $"VideoTrimmer {UpdateService.CurrentVersion}\n\nCuts a video down to the parts you want to keep.\nUses FFmpeg for reading and writing video, and NAudio for playback sound.",
+            "About VideoTrimmer", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     async Task CheckForUpdateAsync(bool manual)
@@ -67,9 +74,13 @@ public sealed partial class MainForm
         {
             availableUpdate = await UpdateService.CheckAsync(updateLifetime.Token);
             if (IsDisposed) return;
+            var known = updateLabel;
             ShowVersion();
             if (manual && availableUpdate is null)
                 SetStatus($"VideoTrimmer is up to date (version {UpdateService.CurrentVersion}).", StatusKind.Good);
+            // A release found in the background is only announced once, and never over an export or playback.
+            else if (!manual && availableUpdate is { } found && known != updateLabel && !exporting && !player.IsPlaying)
+                SetStatus($"VideoTrimmer {found.Version} is available. Open the ⋯ menu to update.", StatusKind.Info);
         }
         catch (OperationCanceledException) when (updateLifetime.IsCancellationRequested) { }
         catch (Exception ex)
@@ -116,26 +127,23 @@ public sealed partial class MainForm
                 "Update VideoTrimmer", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
 
         updateBusy = true;
-        statusBar.UpdateButton.Enabled = false;
         try
         {
             var progress = new Progress<double>(p =>
             {
-                statusBar.UpdateButton.Text = $"Downloading… {p:P0}";
-                statusBar.PerformLayout();
+                updateLabel = $"Downloading… {p:P0}";
+                if (!exporting && !IsDisposed) SetStatus($"Downloading the update… {p:P0}", StatusKind.Busy);
             });
             pendingUpdateSetup = await UpdateService.DownloadAsync(update, progress, updateLifetime.Token);
             pendingUpdateVersion = update.Version;
             if (exporting)
             {
                 // An export started during the download; install when the user clicks again.
-                statusBar.UpdateButton.Text = "Install update";
-                statusBar.UpdateButton.Enabled = true;
-                statusBar.PerformLayout();
+                updateLabel = "Install update";
                 return;
             }
 
-            statusBar.UpdateButton.Text = "Installing…";
+            updateLabel = "Installing…";
             // OnFormClosed hands the installer to the helper once the window is gone.
             Close();
         }
@@ -143,7 +151,6 @@ public sealed partial class MainForm
         catch (Exception ex)
         {
             pendingUpdateSetup = null;
-            statusBar.UpdateButton.Enabled = true;
             ShowVersion();
             SetStatus("The update couldn't be downloaded: " + ex.Message, StatusKind.Error);
         }

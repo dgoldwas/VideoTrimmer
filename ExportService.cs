@@ -12,6 +12,21 @@ readonly record struct ExportStep(string[] Arguments, double Seconds, double Wei
 /// </summary>
 sealed record ExportPlan(IReadOnlyList<ExportStep> Steps, string? WorkDirectory, string? ListFile, string? ListText, IReadOnlyList<string> Outputs);
 
+/// <summary>
+/// Set when the export goes into a different container from the source's. <c>-map 0</c> would then carry streams the
+/// new container cannot hold (font attachments, data tracks), so the streams are picked by hand: the video, the audio,
+/// and each subtitle track the container can take, converted to its text format where needed.
+/// </summary>
+readonly record struct Remux(bool Mp4Family, IReadOnlyList<SubtitleTrack> Subtitles)
+{
+    public static Remux? For(string input, string output, IReadOnlyList<SubtitleTrack> subtitles)
+    {
+        var target = Path.GetExtension(output);
+        if (target.Equals(Path.GetExtension(input), StringComparison.OrdinalIgnoreCase)) return null;
+        return new Remux(OutputFormats.IsMp4Family(target), subtitles);
+    }
+}
+
 static class ExportService
 {
     public static string[] BuildArguments(
@@ -20,10 +35,12 @@ static class ExportService
         double inSeconds,
         double outSeconds,
         bool exact,
-        ExactExportOptions? exactOptions = null)
+        ExactExportOptions? exactOptions = null,
+        Remux? remux = null)
     {
         var start = Text(inSeconds);
         var length = Text(outSeconds - inSeconds);
+        var (maps, subtitleCodecs) = Streams(remux);
         // Exact mode seeks after -i so the cut lands on the chosen frames. Fast copy seeks before -i.
         if (!exact)
         {
@@ -33,8 +50,9 @@ static class ExportService
                 "-ss", start,
                 "-i", input,
                 "-t", length,
-                "-map", "0",
+                .. maps,
                 "-c", "copy",
+                .. subtitleCodecs,
                 "-avoid_negative_ts", "make_zero",
                 output,
             ];
@@ -44,9 +62,10 @@ static class ExportService
         var (crf, preset) = ExactExportPresets.Encoder(options.Quality);
         var audioCodec = options.CopyAudio ? "copy" : "aac";
         // Burning in draws the track on the first video stream, so the subtitle streams are left out rather than shown twice.
+        var burning = options.BurnSubtitles is not null;
         string[] streams = options.BurnSubtitles is { } burn
             ? ["-filter_complex", BurnFilter(input, burn) + "[v]", "-map", "[v]", "-map", "0:a?"]
-            : ["-map", "0"];
+            : maps;
         return
         [
             "-y", "-progress", "pipe:1", "-nostats",
@@ -58,8 +77,33 @@ static class ExportService
             "-crf", crf.ToString(CultureInfo.InvariantCulture),
             "-preset", preset,
             "-c:a", audioCodec,
+            .. burning ? [] : subtitleCodecs,
             output,
         ];
+    }
+
+    /// <summary>
+    /// Which streams go into the output and how its subtitles are written. Keeping the container keeps everything
+    /// (<c>-map 0</c>). Changing it keeps the video, the audio, and the subtitle tracks the new container can hold:
+    /// MP4 and MOV take text subtitles as mov_text and no picture subtitles; MKV takes text as SRT and pictures as they are.
+    /// </summary>
+    static (string[] Maps, string[] SubtitleCodecs) Streams(Remux? remux)
+    {
+        if (remux is not { } target) return (["-map", "0"], []);
+        var maps = new List<string> { "-map", "0:V", "-map", "0:a?" };
+        var codecs = new List<string>();
+        var kept = 0;
+        foreach (var track in target.Subtitles)
+        {
+            if (target.Mp4Family && track.IsBitmap) continue;
+            maps.AddRange(["-map", $"0:s:{track.Index}"]);
+            // ASS keeps its styling in MKV; other text formats become SRT there, and mov_text in MP4 and MOV.
+            var codec = track.IsBitmap ? "copy" : target.Mp4Family ? "mov_text" : track.Codec is "ass" or "ssa" or "subrip" ? "copy" : "srt";
+            codecs.AddRange([$"-c:s:{kept}", codec]);
+            kept++;
+        }
+
+        return (maps.ToArray(), codecs.ToArray());
     }
 
     /// <summary>
@@ -96,7 +140,8 @@ static class ExportService
         double fps,
         bool hasAudio,
         bool exact,
-        ExactExportOptions? exactOptions = null)
+        ExactExportOptions? exactOptions = null,
+        Remux? remux = null)
     {
         if (segments.Count == 0) throw new ArgumentException("Nothing is selected to export.", nameof(segments));
         double Sec(long frame) => frame / fps;
@@ -104,13 +149,14 @@ static class ExportService
         if (segments.Count == 1)
         {
             var only = segments[0];
-            return new ExportPlan([new ExportStep(BuildArguments(input, output, Sec(only.In), Sec(only.Out), exact, exactOptions), total, 1)], null, null, null, [output]);
+            return new ExportPlan([new ExportStep(BuildArguments(input, output, Sec(only.In), Sec(only.Out), exact, exactOptions, remux), total, 1)], null, null, null, [output]);
         }
 
         if (exact)
             return new ExportPlan([new ExportStep(BuildExactConcat(input, output, segments, fps, hasAudio, exactOptions ?? ExactExportOptions.Default), total, 1)], null, null, null, [output]);
 
         // Fast copy: copy each part beside the output (same drive, so no cross-volume copies), then join them losslessly.
+        // The parts are already written in the output's container, so a change of container happens in them, not in the join.
         var directory = Path.GetDirectoryName(Path.GetFullPath(output)) ?? ".";
         var work = Path.Combine(directory, "." + Path.GetFileName(output) + ".parts");
         var extension = Path.GetExtension(output);
@@ -120,7 +166,7 @@ static class ExportService
         {
             var name = $"part{i + 1:000}{extension}";
             var seconds = Sec(segments[i].Out) - Sec(segments[i].In);
-            steps.Add(new ExportStep(BuildArguments(input, Path.Combine(work, name), Sec(segments[i].In), Sec(segments[i].Out), exact: false), seconds, seconds));
+            steps.Add(new ExportStep(BuildArguments(input, Path.Combine(work, name), Sec(segments[i].In), Sec(segments[i].Out), exact: false, remux: remux), seconds, seconds));
             list.Append("file '").Append(name).Append("'\n");
         }
 
@@ -157,14 +203,15 @@ static class ExportService
         IReadOnlyList<Segment> segments,
         double fps,
         bool exact,
-        ExactExportOptions? exactOptions = null)
+        ExactExportOptions? exactOptions = null,
+        Remux? remux = null)
     {
         if (segments.Count == 0) throw new ArgumentException("Nothing is selected to export.", nameof(segments));
         var outputs = SeparateOutputs(output, segments.Count);
         var steps = segments.Select((segment, i) =>
         {
             var seconds = (segment.Out - segment.In) / fps;
-            return new ExportStep(BuildArguments(input, outputs[i], segment.In / fps, segment.Out / fps, exact, exactOptions), seconds, seconds);
+            return new ExportStep(BuildArguments(input, outputs[i], segment.In / fps, segment.Out / fps, exact, exactOptions, remux), seconds, seconds);
         }).ToList();
         return new ExportPlan(steps, null, null, null, outputs);
     }
@@ -306,6 +353,18 @@ static class ExportService
         var concatGraph = burnedConcat[Array.IndexOf(burnedConcat, "-filter_complex") + 1];
         Expect(concatGraph.StartsWith("[0:v:0]subtitles=") && concatGraph.Contains("si=1,split=2[vs0][vs1]"), "multi-cut burns in before splitting, on the source timeline");
         Expect(!BuildArguments("in.mkv", "out.mkv", 1, 5, exact: false).Contains("-filter_complex"), "fast copy never burns in");
+
+        Expect(Remux.For("in.mkv", "out.MKV", []) is null, "the same container is not a conversion");
+        SubtitleTrack[] mixed = [english, new SubtitleTrack(2, "hdmv_pgs_subtitle", null, null), new SubtitleTrack(3, "ass", null, null)];
+        var toMp4 = string.Join(" ", BuildArguments("in.mkv", "out.mp4", 1, 5, exact: false, remux: Remux.For("in.mkv", "out.mp4", mixed)));
+        Expect(toMp4.Contains("-map 0:V -map 0:a? -map 0:s:1 -map 0:s:3 -c copy -c:s:0 mov_text -c:s:1 mov_text"), "MP4 takes video, audio and text subtitles as mov_text, and leaves picture subtitles out");
+        Expect(!toMp4.Contains("-map 0 "), "a conversion never maps every stream");
+        var toMkv = string.Join(" ", BuildArguments("in.mp4", "out.mkv", 1, 5, exact: true, remux: Remux.For("in.mp4", "out.mkv", [new SubtitleTrack(0, "mov_text", null, null), mixed[1]])));
+        Expect(toMkv.Contains("-map 0:V -map 0:a? -map 0:s:0 -map 0:s:2") && toMkv.Contains("-c:a aac -c:s:0 srt -c:s:1 copy"), "MKV takes text subtitles as SRT and picture subtitles as they are");
+        var burnedMp4 = string.Join(" ", BuildArguments("in.mkv", "out.mp4", 1, 5, exact: true, ExactExportOptions.Default with { BurnSubtitles = english }, Remux.For("in.mkv", "out.mp4", mixed)));
+        Expect(!burnedMp4.Contains("-c:s") && !burnedMp4.Contains("0:s:3"), "a burned-in conversion carries no subtitle streams");
+        var convertedParts = Plan("in.mkv", Path.Combine("C:\\clips", "out.mp4"), two, 30, hasAudio: true, exact: false, remux: Remux.For("in.mkv", "out.mp4", mixed));
+        Expect(convertedParts.Steps[0].Arguments.Contains("0:V") && convertedParts.Steps[^1].Arguments.Contains("0"), "multi-cut converts in the parts and joins them as they are");
         return errors;
     }
 }

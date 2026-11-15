@@ -158,7 +158,8 @@ sealed class FilmstripService
                 acquired = true;
                 // The middle of the slot's share of the window.
                 var frame = key.Start + (key.End - key.Start) * (index + 0.5) / count;
-                var time = Math.Min(frame / fps, Math.Max(0, duration - 0.05));
+                // The last tile can hang past the end of the clip, where there is nothing to decode: show the final half second.
+                var time = Math.Min(frame / fps, Math.Max(0, duration - 0.5));
                 var bitmap = await stills.CaptureAsync(input, duration, time, accurate: false, "scale=-2:" + height, 5, token).ConfigureAwait(false);
                 void Assign()
                 {

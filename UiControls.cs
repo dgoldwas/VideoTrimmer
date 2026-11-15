@@ -2,39 +2,97 @@ using System.Drawing.Drawing2D;
 
 namespace VideoTrimmer;
 
-static class PaintUtil
+/// <summary>
+/// A control that paints the window's backdrop under itself, so it looks see-through without any real transparency.
+/// One that sits on a glass panel adds the panel's tint, which makes it blend into the panel around it.
+/// </summary>
+abstract class GlassControl : Control
 {
-    public static GraphicsPath Rounded(Rectangle bounds, int radius)
-    {
-        var path = new GraphicsPath();
-        var diameter = Math.Max(1, radius * 2);
-        if (bounds.Width <= diameter || bounds.Height <= diameter)
-        {
-            path.AddRectangle(bounds);
-            return path;
-        }
+    protected const TextFormatFlags Line = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine
+        | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis;
 
-        path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
-        path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
-        path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
-        path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
-        path.CloseFigure();
-        return path;
+    static readonly SolidBrush PanelBrush = new(Theme.PanelFill);
+
+    protected GlassControl()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        ForeColor = Theme.Text;
+        BackColor = Theme.Base;
+    }
+
+    /// <summary>True for a child of a glass panel.</summary>
+    public bool OnPanel { get; set; }
+
+    protected void PaintBase(Graphics g)
+    {
+        Backdrop.Paint(g, this);
+        if (OnPanel) g.FillRectangle(PanelBrush, ClientRectangle);
+    }
+
+    protected int S(int logical) => LogicalToDeviceUnits(logical);
+
+    protected static int TextWidth(string text, Font font) =>
+        text.Length == 0 ? 0 : TextRenderer.MeasureText(text, font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine).Width;
+
+    protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+}
+
+/// <summary>Painted text. A stock Label cannot show the backdrop through itself.</summary>
+sealed class GlassLabel : GlassControl
+{
+    public GlassLabel()
+    {
+        Font = Theme.Ui(9.5f);
+        TabStop = false;
+        AccessibleRole = AccessibleRole.StaticText;
+    }
+
+    public ContentAlignment Align { get; set; } = ContentAlignment.MiddleLeft;
+    /// <summary>Wraps onto several lines from the top, for the export explanation.</summary>
+    public bool Wrap { get; set; }
+
+    public int MeasureWidth() => TextWidth(Text, Font);
+
+    public int MeasureHeight(int width) => TextRenderer.MeasureText(Text, Font, new Size(Math.Max(40, width), int.MaxValue),
+        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak).Height;
+
+    protected override void OnTextChanged(EventArgs e) { Invalidate(); base.OnTextChanged(e); }
+    protected override void OnForeColorChanged(EventArgs e) { Invalidate(); base.OnForeColorChanged(e); }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        PaintBase(e.Graphics);
+        if (Text.Length == 0) return;
+        var flags = Wrap
+            ? TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak
+            : Line | Align switch
+            {
+                ContentAlignment.MiddleRight => TextFormatFlags.Right,
+                ContentAlignment.MiddleCenter => TextFormatFlags.HorizontalCenter,
+                _ => TextFormatFlags.Left,
+            };
+        TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, ForeColor, flags);
     }
 }
 
-sealed class FlatButton : Control, IButtonControl
+enum ButtonKind { Primary, Glass, Quiet, Caution }
+
+/// <summary>
+/// The one button, in four weights: Primary (one per window), Glass (a faint filled control), Quiet (bare until hovered,
+/// for the dock's tools) and Caution (cancel and remove).
+/// </summary>
+sealed class GlassButton : GlassControl, IButtonControl
 {
     bool hover;
     bool pressed;
-    bool isDefault;
+    double progress = -1;
 
-    public FlatButton()
+    public GlassButton()
     {
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+        SetStyle(ControlStyles.Selectable, true);
         Font = Theme.Ui(9.5f, FontStyle.Bold);
-        ForeColor = Theme.Text;
-        BackColor = Theme.Background;
         Cursor = Cursors.Hand;
         TabStop = true;
         AccessibleRole = AccessibleRole.PushButton;
@@ -42,17 +100,31 @@ sealed class FlatButton : Control, IButtonControl
         Size = new Size(120, 36);
     }
 
-    protected override AccessibleObject CreateAccessibilityInstance() => new FlatButtonAccessibleObject(this);
+    protected override AccessibleObject CreateAccessibilityInstance() => new ButtonAccessibleObject(this);
 
-    public bool Primary { get; set; }
-    public Color? TextColor { get; set; }
+    public ButtonKind Kind { get; set; } = ButtonKind.Glass;
+    public Icon Icon { get; set; }
+    /// <summary>A small key cap after the label, such as S for Split.</summary>
+    public string? KeyHint { get; set; }
+    /// <summary>Muted text after the label of a left-aligned button.</summary>
+    public string Detail { get; set; } = "";
+    public bool AlignLeft { get; set; }
+    /// <summary>A chevron at the right edge: the button opens a menu.</summary>
+    public bool Chevron { get; set; }
+    /// <summary>A dot in the corner: something is waiting behind this button.</summary>
+    public bool Dot { get; set; }
+    /// <summary>Icon only, when there is no room for the label.</summary>
+    public bool Compact { get; set; }
     public DialogResult DialogResult { get; set; }
 
-    public void NotifyDefault(bool value)
+    /// <summary>0 to 1 fills the button as a progress bar; negative shows it as a normal button.</summary>
+    public double Progress
     {
-        isDefault = value;
-        Invalidate();
+        get => progress;
+        set { progress = value; Invalidate(); }
     }
+
+    public void NotifyDefault(bool value) { }
 
     public void PerformClick()
     {
@@ -60,47 +132,126 @@ sealed class FlatButton : Control, IButtonControl
         OnClick(EventArgs.Empty);
     }
 
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var fill = Primary ? Theme.Accent : Theme.Surface;
-        var text = Primary ? Color.White : TextColor ?? Theme.Text;
-        var border = Primary ? Theme.Accent : Theme.Border;
-        if (!Enabled)
-        {
-            fill = Theme.Surface;
-            text = Theme.Muted;
-            border = Theme.Border;
-        }
-        else if (pressed)
-        {
-            fill = Theme.Darken(fill, 24);
-        }
-        else if (hover)
-        {
-            fill = Theme.Lift(fill, 18);
-        }
+    bool ShowsText => Text.Length > 0 && !Compact;
+    bool ShowsHint => !string.IsNullOrEmpty(KeyHint) && !Compact;
+    Font HintFont => Theme.Ui(8);
+    int IconSize => S(16);
 
-        var graphics = e.Graphics;
-        graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        var rect = new Rectangle(0, 0, Math.Max(1, Width - 1), Math.Max(1, Height - 1));
-        using var path = PaintUtil.Rounded(rect, LogicalToDeviceUnits(8));
-        using var brush = new SolidBrush(fill);
-        graphics.FillPath(brush, path);
-        using var pen = new Pen(isDefault && !Primary && Enabled ? Theme.Accent : border);
-        graphics.DrawPath(pen, path);
-        TextRenderer.DrawText(graphics, Text, Font, ClientRectangle, text,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-        if (Focused && ShowFocusCues)
-            ControlPaint.DrawFocusRectangle(graphics, Rectangle.Inflate(ClientRectangle, -4, -4));
+    /// <summary>The width that fits the icon, label and key hint.</summary>
+    public int PreferredWidth()
+    {
+        var content = ContentWidth();
+        return ShowsText ? content + S(12) * 2 : Math.Max(S(36), content + S(10) * 2);
     }
 
+    int ContentWidth()
+    {
+        var width = 0;
+        if (Icon != Icon.None) width += IconSize;
+        if (ShowsText) width += (width > 0 ? S(8) : 0) + TextWidth(Text, Font);
+        if (ShowsHint) width += S(8) + TextWidth(KeyHint!, HintFont) + S(10);
+        return width;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        PaintBase(g);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var rect = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+        var radius = S(Kind is ButtonKind.Primary or ButtonKind.Quiet ? 10 : 8);
+        var text = ForeColor;
+        if (progress >= 0)
+        {
+            PaintUtil.Fill(g, rect, radius, Theme.ControlFill);
+            var state = g.Save();
+            using (var clip = PaintUtil.Rounded(rect, radius)) g.SetClip(clip, CombineMode.Intersect);
+            using (var fill = new SolidBrush(Theme.Alpha(Theme.Accent, 150)))
+                g.FillRectangle(fill, 0, 0, (float)(Width * Math.Clamp(progress, 0, 1)), Height);
+            g.Restore(state);
+            PaintUtil.Stroke(g, rect, radius, Theme.ControlBorder);
+        }
+        else if (!Enabled)
+        {
+            if (Kind != ButtonKind.Quiet) PaintUtil.Stroke(g, rect, radius, Theme.Hairline);
+            text = Theme.Faint;
+        }
+        else if (Kind == ButtonKind.Primary)
+        {
+            var fill = pressed ? Theme.Darken(Theme.Accent, 26) : hover ? Theme.Lift(Theme.Accent, 16) : Theme.Accent;
+            PaintUtil.Fill(g, rect, radius, fill);
+            if (!pressed)
+            {
+                using var shine = new Pen(Color.FromArgb(60, 255, 255, 255));
+                g.DrawLine(shine, rect.Left + radius, rect.Top + 1, rect.Right - radius, rect.Top + 1);
+            }
+
+            text = Theme.OnAccent;
+        }
+        else if (Kind == ButtonKind.Quiet)
+        {
+            if (pressed) PaintUtil.Fill(g, rect, radius, Theme.ControlPressed);
+            else if (hover) PaintUtil.Fill(g, rect, radius, Theme.ControlHover);
+        }
+        else
+        {
+            var caution = Kind == ButtonKind.Caution;
+            var fill = pressed ? Theme.ControlPressed : hover ? (caution ? Theme.Alpha(Theme.Caution, 36) : Theme.ControlHover) : Theme.ControlFill;
+            PaintUtil.Fill(g, rect, radius, fill);
+            PaintUtil.Stroke(g, rect, radius, caution && (hover || pressed) ? Theme.Alpha(Theme.Caution, 115) : Theme.ControlBorder);
+            if (caution) text = Theme.Caution;
+        }
+
+        var right = Width - (Chevron ? S(8) + S(14) + S(4) : AlignLeft ? S(10) : S(4));
+        var x = AlignLeft ? S(10) : Math.Max(S(4), (Width - ContentWidth()) / 2);
+        if (Icon != Icon.None)
+        {
+            Icons.Draw(g, Icon, new RectangleF(x, (Height - IconSize) / 2f, IconSize, IconSize), text);
+            x += IconSize + S(8);
+        }
+
+        if (ShowsText)
+        {
+            var width = Math.Min(TextWidth(Text, Font), Math.Max(0, right - x));
+            TextRenderer.DrawText(g, Text, Font, new Rectangle(x, 0, width, Height), text, Line | TextFormatFlags.Left);
+            x += width + S(8);
+        }
+
+        if (ShowsHint && x < right)
+        {
+            var chipWidth = TextWidth(KeyHint!, HintFont) + S(10);
+            var chipHeight = S(18);
+            var chip = new Rectangle(x, (Height - chipHeight) / 2, chipWidth, chipHeight);
+            PaintUtil.Stroke(g, new RectangleF(chip.X + 0.5f, chip.Y + 0.5f, chip.Width - 1, chip.Height - 1), S(4), Color.FromArgb(40, 255, 255, 255));
+            TextRenderer.DrawText(g, KeyHint, HintFont, chip, Enabled ? Theme.Muted : Theme.Faint, Line | TextFormatFlags.HorizontalCenter);
+        }
+        else if (AlignLeft && Detail.Length > 0 && x < right)
+        {
+            TextRenderer.DrawText(g, Detail, Theme.Ui(9), new Rectangle(x, 0, right - x, Height), Enabled ? Theme.Muted : Theme.Faint, Line | TextFormatFlags.Left);
+        }
+
+        if (Chevron)
+            Icons.Draw(g, Icon.Chevron, new RectangleF(Width - S(8) - S(14), (Height - S(14)) / 2f, S(14), S(14)), Enabled ? Theme.Muted : Theme.Faint);
+        if (Dot)
+        {
+            using var dot = new SolidBrush(Theme.Accent);
+            g.FillEllipse(dot, Width - S(11), S(4), S(7), S(7));
+        }
+
+        if (Focused && ShowFocusCues) PaintUtil.FocusRing(g, ClientRectangle, radius);
+    }
+
+    protected override void OnTextChanged(EventArgs e) { Invalidate(); base.OnTextChanged(e); }
     protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
     protected override void OnMouseLeave(EventArgs e) { hover = false; pressed = false; Invalidate(); base.OnMouseLeave(e); }
     protected override void OnMouseDown(MouseEventArgs e) { if (e.Button == MouseButtons.Left) { pressed = true; Invalidate(); } base.OnMouseDown(e); }
     protected override void OnMouseUp(MouseEventArgs e) { pressed = false; Invalidate(); base.OnMouseUp(e); }
-    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
-    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
-    protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; Invalidate(); base.OnEnabledChanged(e); }
+
+    protected override void OnEnabledChanged(EventArgs e)
+    {
+        Cursor = Enabled ? Cursors.Hand : Cursors.Default;
+        base.OnEnabledChanged(e);
+    }
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
@@ -114,11 +265,11 @@ sealed class FlatButton : Control, IButtonControl
         base.OnKeyDown(e);
     }
 
-    sealed class FlatButtonAccessibleObject : ControlAccessibleObject
+    sealed class ButtonAccessibleObject : ControlAccessibleObject
     {
-        readonly FlatButton owner;
+        readonly GlassButton owner;
 
-        public FlatButtonAccessibleObject(FlatButton owner) : base(owner) => this.owner = owner;
+        public ButtonAccessibleObject(GlassButton owner) : base(owner) => this.owner = owner;
 
         public override AccessibleRole Role => AccessibleRole.PushButton;
         public override string Name => owner.AccessibleName ?? owner.Text;
@@ -151,82 +302,170 @@ sealed class FlatButton : Control, IButtonControl
     }
 }
 
-sealed class OptionCard : Control
+/// <summary>Pick one of a few: a dark track with the chosen cell raised. Left and Right move the choice.</summary>
+sealed class Segmented : GlassControl
 {
-    bool hover;
-    bool selected;
-    string title = "";
+    string[] items = [];
+    int selected;
+    int hover = -1;
 
-    public OptionCard()
+    public Segmented()
     {
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
-        Font = Theme.Ui(9.5f, FontStyle.Bold);
-        ForeColor = Theme.Text;
-        BackColor = Theme.Background;
+        SetStyle(ControlStyles.Selectable, true);
+        Font = Theme.Ui(9.5f);
         Cursor = Cursors.Hand;
         TabStop = true;
-        AccessibleRole = AccessibleRole.RadioButton;
-        AccessibleDefaultActionDescription = "Select";
-        Size = new Size(180, 40);
+        AccessibleRole = AccessibleRole.PageTabList;
     }
 
-    public void PerformClick()
+    /// <summary>Raised when the user picks a cell; <see cref="SelectedIndex"/> is not changed for them.</summary>
+    public event Action<int>? Picked;
+
+    public string[] Items
     {
-        if (!Enabled) return;
-        OnClick(EventArgs.Empty);
+        get => items;
+        set { items = value; Invalidate(); }
     }
 
-    protected override AccessibleObject CreateAccessibilityInstance() => new OptionCardAccessibleObject(this);
-
-    public string Title
-    {
-        get => title;
-        set { title = value; Text = value; AccessibleName = value; Invalidate(); }
-    }
-
-    public bool Selected
+    public int SelectedIndex
     {
         get => selected;
-        set { selected = value; Invalidate(); }
+        set
+        {
+            selected = value;
+            AccessibleDescription = value >= 0 && value < items.Length ? items[value] + " selected" : "";
+            Invalidate();
+        }
+    }
+
+    RectangleF Cell(int index)
+    {
+        var inset = S(3);
+        var width = (Width - inset * 2) / (float)Math.Max(1, items.Length);
+        return new RectangleF(inset + width * index, inset, width, Height - inset * 2);
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        var fill = !Enabled ? Theme.Surface : Selected ? Theme.Mix(Theme.Surface, Theme.Accent, 0.28f) : hover ? Theme.Lift(Theme.Surface, 12) : Theme.Surface;
-        var border = Selected ? Theme.Accent : Theme.Border;
-        var text = Enabled ? Theme.Text : Theme.Muted;
-        var graphics = e.Graphics;
-        graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        var rect = new Rectangle(0, 0, Math.Max(1, Width - 1), Math.Max(1, Height - 1));
-        using var path = PaintUtil.Rounded(rect, LogicalToDeviceUnits(8));
-        using var brush = new SolidBrush(fill);
-        graphics.FillPath(brush, path);
-        using var pen = new Pen(border, Selected ? 2 : 1);
-        graphics.DrawPath(pen, path);
-        var textRect = new Rectangle(LogicalToDeviceUnits(14), 0, Math.Max(1, Width - LogicalToDeviceUnits(22)), Height);
-        TextRenderer.DrawText(graphics, Title, Font, textRect, text,
-            TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
-        if (Focused && ShowFocusCues)
-            ControlPaint.DrawFocusRectangle(graphics, Rectangle.Inflate(ClientRectangle, -4, -4));
+        var g = e.Graphics;
+        PaintBase(g);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var track = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+        PaintUtil.Fill(g, track, S(10), Theme.Well);
+        PaintUtil.Stroke(g, track, S(10), Theme.WellBorder);
+        for (var i = 0; i < items.Length; i++)
+        {
+            var cell = Cell(i);
+            var on = i == selected;
+            if (on) PaintUtil.Fill(g, cell, S(7), Enabled ? Theme.Selected : Theme.Hairline);
+            var color = !Enabled ? Theme.Faint : on || i == hover ? Theme.Text : Theme.Muted;
+            TextRenderer.DrawText(g, items[i], on ? Theme.Ui(Font.SizeInPoints, FontStyle.Bold) : Font, Rectangle.Round(cell), color, Line | TextFormatFlags.HorizontalCenter);
+        }
+
+        if (Focused && ShowFocusCues) PaintUtil.FocusRing(g, ClientRectangle, S(10));
+    }
+
+    int HitAt(Point point)
+    {
+        for (var i = 0; i < items.Length; i++)
+            if (Cell(i).Contains(point)) return i;
+        return -1;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        var index = HitAt(e.Location);
+        if (index == hover) return;
+        hover = index;
+        Invalidate();
+    }
+
+    protected override void OnMouseLeave(EventArgs e) { hover = -1; Invalidate(); base.OnMouseLeave(e); }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        if (e.Button != MouseButtons.Left || !Enabled) return;
+        var index = HitAt(e.Location);
+        if (index >= 0 && index != selected) Picked?.Invoke(index);
+    }
+
+    protected override bool IsInputKey(Keys keyData) => keyData is Keys.Left or Keys.Right || base.IsInputKey(keyData);
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        var next = e.KeyCode switch { Keys.Left => selected - 1, Keys.Right => selected + 1, _ => -1 };
+        if (next >= 0 && next < items.Length)
+        {
+            Picked?.Invoke(next);
+            e.Handled = true;
+            return;
+        }
+
+        base.OnKeyDown(e);
+    }
+}
+
+/// <summary>A labelled on/off switch; the whole row is the target.</summary>
+sealed class ToggleSwitch : GlassControl
+{
+    bool on;
+    bool hover;
+
+    public ToggleSwitch()
+    {
+        SetStyle(ControlStyles.Selectable, true);
+        Font = Theme.Ui(9.5f);
+        Cursor = Cursors.Hand;
+        TabStop = true;
+        AccessibleRole = AccessibleRole.CheckButton;
+    }
+
+    /// <summary>Raised when the user flips the switch; <see cref="Checked"/> is not changed for them.</summary>
+    public event Action<bool>? Toggled;
+
+    public bool Checked
+    {
+        get => on;
+        set { on = value; Invalidate(); }
+    }
+
+    protected override AccessibleObject CreateAccessibilityInstance() => new SwitchAccessibleObject(this);
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        PaintBase(g);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var width = S(34);
+        var height = S(20);
+        var track = new RectangleF(Width - width - 0.5f, (Height - height) / 2f, width, height);
+        TextRenderer.DrawText(g, Text, Font, new Rectangle(0, 0, Math.Max(1, (int)track.Left - S(8)), Height), Enabled ? Theme.Text : Theme.Faint, Line | TextFormatFlags.Left);
+        var active = on && Enabled;
+        PaintUtil.Fill(g, track, height / 2f, active ? Theme.Accent : Theme.Well);
+        if (!active) PaintUtil.Stroke(g, track, height / 2f, hover && Enabled ? Color.FromArgb(110, 255, 255, 255) : Color.FromArgb(64, 255, 255, 255));
+        var knob = S(12);
+        var inset = (height - knob) / 2f;
+        using var brush = new SolidBrush(active ? Theme.OnAccent : Enabled ? Theme.Muted : Theme.Faint);
+        g.FillEllipse(brush, on ? track.Right - inset - knob : track.Left + inset, track.Top + inset, knob, knob);
+        if (Focused && ShowFocusCues) PaintUtil.FocusRing(g, Rectangle.Round(RectangleF.Inflate(track, S(3), S(3))), S(12));
     }
 
     protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
     protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
-    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
-    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
-    protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
 
-    protected override void OnClick(EventArgs e)
+    protected override void OnMouseUp(MouseEventArgs e)
     {
-        if (!Enabled) return;
-        base.OnClick(e);
+        base.OnMouseUp(e);
+        if (e.Button == MouseButtons.Left && Enabled) Toggled?.Invoke(!on);
     }
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
         if (e.KeyCode is Keys.Space or Keys.Enter)
         {
-            OnClick(EventArgs.Empty);
+            Toggled?.Invoke(!on);
             e.Handled = true;
             return;
         }
@@ -234,15 +473,15 @@ sealed class OptionCard : Control
         base.OnKeyDown(e);
     }
 
-    sealed class OptionCardAccessibleObject : ControlAccessibleObject
+    sealed class SwitchAccessibleObject : ControlAccessibleObject
     {
-        readonly OptionCard owner;
+        readonly ToggleSwitch owner;
 
-        public OptionCardAccessibleObject(OptionCard owner) : base(owner) => this.owner = owner;
+        public SwitchAccessibleObject(ToggleSwitch owner) : base(owner) => this.owner = owner;
 
-        public override AccessibleRole Role => AccessibleRole.RadioButton;
+        public override AccessibleRole Role => AccessibleRole.CheckButton;
         public override string Name => owner.AccessibleName ?? owner.Text;
-        public override string DefaultAction => "Select";
+        public override string DefaultAction => owner.Checked ? "Turn off" : "Turn on";
 
         public override AccessibleStates State
         {
@@ -250,7 +489,7 @@ sealed class OptionCard : Control
             {
                 var state = AccessibleStates.Focusable;
                 if (owner.Focused) state |= AccessibleStates.Focused;
-                if (owner.Selected) state |= AccessibleStates.Checked;
+                if (owner.Checked) state |= AccessibleStates.Checked;
                 if (!owner.Enabled) state |= AccessibleStates.Unavailable;
                 if (!owner.Visible) state |= AccessibleStates.Invisible;
                 return state;
@@ -262,7 +501,7 @@ sealed class OptionCard : Control
             if (!owner.Enabled || !owner.IsHandleCreated) return;
             try
             {
-                owner.BeginInvoke(new Action(owner.PerformClick));
+                owner.BeginInvoke(new Action(() => owner.Toggled?.Invoke(!owner.Checked)));
             }
             catch (InvalidOperationException)
             {
@@ -272,22 +511,22 @@ sealed class OptionCard : Control
     }
 }
 
-sealed class DarkField : Panel
+/// <summary>A text box in a rounded well; the border takes the accent while it has focus.</summary>
+sealed class DarkField : GlassControl
 {
     public TextBox Box { get; }
 
     public DarkField()
     {
-        BackColor = Theme.Border;
         Box = new TextBox
         {
             BorderStyle = BorderStyle.None,
-            BackColor = Theme.Surface,
+            BackColor = Theme.Well,
             ForeColor = Theme.Text,
-            Font = Theme.Mono(11),
+            Font = Theme.Mono(10),
         };
-        Box.GotFocus += (_, _) => { BackColor = Theme.Accent; Box.SelectAll(); };
-        Box.LostFocus += (_, _) => BackColor = Theme.Border;
+        Box.GotFocus += (_, _) => { Invalidate(); Box.SelectAll(); };
+        Box.LostFocus += (_, _) => Invalidate();
         Controls.Add(Box);
     }
 
@@ -295,7 +534,17 @@ sealed class DarkField : Panel
     {
         base.OnLayout(levent);
         var y = Math.Max(1, (ClientSize.Height - Box.PreferredHeight) / 2);
-        Box.SetBounds(LogicalToDeviceUnits(8), y, Math.Max(10, ClientSize.Width - LogicalToDeviceUnits(16)), Box.PreferredHeight);
+        Box.SetBounds(S(8), y, Math.Max(10, ClientSize.Width - S(16)), Box.PreferredHeight);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        PaintBase(g);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var rect = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+        PaintUtil.Fill(g, rect, S(8), Theme.Well);
+        PaintUtil.Stroke(g, rect, S(8), Box.Focused ? Theme.Accent : Theme.WellBorder);
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -305,46 +554,17 @@ sealed class DarkField : Panel
     }
 }
 
-sealed class ThinProgress : Control
+/// <summary>The empty window: a glass card that takes a dropped video or opens the file picker.</summary>
+sealed class DropPrompt : GlassControl
 {
-    double fraction;
-
-    public ThinProgress()
-    {
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        TabStop = false;
-        AccessibleRole = AccessibleRole.ProgressBar;
-        Visible = false;
-    }
-
-    public double Fraction
-    {
-        get => fraction;
-        set { fraction = Math.Clamp(value, 0, 1); Invalidate(); }
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        e.Graphics.Clear(Theme.Border);
-        var width = (int)Math.Round(ClientSize.Width * fraction);
-        if (width <= 0) return;
-        using var brush = new SolidBrush(Theme.Accent);
-        e.Graphics.FillRectangle(brush, 0, 0, width, ClientSize.Height);
-    }
-}
-
-sealed class DropPrompt : Control
-{
-    public FlatButton Open { get; }
+    public GlassButton Open { get; }
     public event EventHandler? OpenRequested;
 
     public DropPrompt()
     {
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        BackColor = Theme.Background;
         AccessibleName = "Drop a video to trim";
         Cursor = Cursors.Hand;
-        Open = new FlatButton { Text = "Open a video", Primary = true, AccessibleName = "Open a video" };
+        Open = new GlassButton { Text = "Open a video", Kind = ButtonKind.Primary, AccessibleName = "Open a video", OnPanel = true };
         Open.Click += (_, _) => OpenRequested?.Invoke(this, EventArgs.Empty);
         Controls.Add(Open);
     }
@@ -359,177 +579,109 @@ sealed class DropPrompt : Control
     protected override void OnLayout(LayoutEventArgs levent)
     {
         base.OnLayout(levent);
-        var top = BlockTop();
-        Open.SetBounds(
-            Math.Max(0, (ClientSize.Width - LogicalToDeviceUnits(180)) / 2),
-            top + LogicalToDeviceUnits(84),
-            LogicalToDeviceUnits(180),
-            LogicalToDeviceUnits(40));
+        Open.SetBounds(Math.Max(0, (ClientSize.Width - S(180)) / 2), BlockTop() + S(84), S(180), S(40));
     }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var graphics = e.Graphics;
-        graphics.Clear(Theme.Background);
-        graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        var pad = LogicalToDeviceUnits(8);
-        var rect = Rectangle.Inflate(ClientRectangle, -pad, -pad);
-        if (rect.Width < 20 || rect.Height < 20) return;
-        using var pen = new Pen(Theme.Border, 2) { DashStyle = DashStyle.Dash };
-        using var path = PaintUtil.Rounded(new Rectangle(rect.X, rect.Y, rect.Width - 1, rect.Height - 1), LogicalToDeviceUnits(16));
-        graphics.DrawPath(pen, path);
-
-        var top = BlockTop();
-        var titleFont = Theme.Ui(22, FontStyle.Bold);
-        var titleRect = new Rectangle(0, top, ClientSize.Width, LogicalToDeviceUnits(36));
-        TextRenderer.DrawText(graphics, "Drop a video to trim", titleFont, titleRect, Theme.Text,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-        var subRect = new Rectangle(pad, top + LogicalToDeviceUnits(40), ClientSize.Width - pad * 2, LogicalToDeviceUnits(24));
-        TextRenderer.DrawText(graphics, "mkv, mp4, mov, avi, webm, ts, m2ts, wmv", Theme.Ui(10), subRect, Theme.Muted,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-    }
-
-    int BlockTop() => Math.Max(LogicalToDeviceUnits(16), (ClientSize.Height - LogicalToDeviceUnits(140)) / 2);
-}
-
-sealed class ToolbarPanel : Panel
-{
-    public Label FileName { get; }
-    public Label Meta { get; }
-    public FlatButton Open { get; }
-
-    public ToolbarPanel()
-    {
-        BackColor = Theme.Surface;
-        Visible = false;
-        FileName = new Label
-        {
-            AutoEllipsis = true,
-            ForeColor = Theme.Text,
-            Font = Theme.Ui(10, FontStyle.Bold),
-            TextAlign = ContentAlignment.MiddleLeft,
-            AccessibleName = "File name",
-        };
-        Meta = new Label
-        {
-            AutoEllipsis = true,
-            ForeColor = Theme.Muted,
-            Font = Theme.Ui(9),
-            TextAlign = ContentAlignment.MiddleLeft,
-            AccessibleName = "Video details",
-        };
-        Open = new FlatButton { Text = "Open", AccessibleName = "Open" };
-        Controls.Add(FileName);
-        Controls.Add(Meta);
-        Controls.Add(Open);
-    }
-
-    protected override void OnLayout(LayoutEventArgs levent)
-    {
-        base.OnLayout(levent);
-        var pad = LogicalToDeviceUnits(12);
-        var buttonWidth = LogicalToDeviceUnits(96);
-        var buttonHeight = LogicalToDeviceUnits(32);
-        var y = Math.Max(pad, (ClientSize.Height - buttonHeight) / 2);
-        Open.SetBounds(Math.Max(pad, ClientSize.Width - pad - buttonWidth), y, buttonWidth, buttonHeight);
-        var textWidth = Math.Max(10, Open.Left - pad * 2);
-        FileName.SetBounds(pad, LogicalToDeviceUnits(6), textWidth, LogicalToDeviceUnits(22));
-        Meta.SetBounds(pad, FileName.Bottom, textWidth, LogicalToDeviceUnits(20));
-    }
-}
-
-sealed class StatusBar : Panel
-{
-    public Label Label { get; }
-    public ThinProgress Progress { get; }
-    /// <summary>Checks for updates; becomes "Update to ..." when GitHub has a newer release.</summary>
-    public FlatButton UpdateButton { get; }
-
-    public StatusBar()
-    {
-        BackColor = Theme.Surface;
-        Label = new Label
-        {
-            AutoEllipsis = true,
-            ForeColor = Theme.Muted,
-            TextAlign = ContentAlignment.MiddleLeft,
-            AccessibleName = "Status",
-        };
-        Progress = new ThinProgress { AccessibleName = "Export progress" };
-        UpdateButton = new FlatButton { Font = Theme.Ui(8.5f), TextColor = Theme.Muted, AccessibleName = "Check for updates", TabStop = true };
-        Controls.Add(Label);
-        Controls.Add(Progress);
-        Controls.Add(UpdateButton);
-    }
-
-    protected override void OnLayout(LayoutEventArgs levent)
-    {
-        base.OnLayout(levent);
-        var pad = LogicalToDeviceUnits(12);
-        var right = ClientSize.Width - LogicalToDeviceUnits(4);
-        if (UpdateButton.Visible)
-        {
-            var updateWidth = TextRenderer.MeasureText(UpdateButton.Text, UpdateButton.Font).Width + LogicalToDeviceUnits(20);
-            var updateHeight = Math.Max(1, ClientSize.Height - LogicalToDeviceUnits(6));
-            UpdateButton.SetBounds(right - updateWidth, (ClientSize.Height - updateHeight) / 2, updateWidth, updateHeight);
-            right = UpdateButton.Left - LogicalToDeviceUnits(8);
-        }
-
-        if (Progress.Visible)
-        {
-            var progressWidth = LogicalToDeviceUnits(160);
-            var progressHeight = LogicalToDeviceUnits(8);
-            Progress.SetBounds(right - progressWidth, Math.Max(0, (ClientSize.Height - progressHeight) / 2), progressWidth, progressHeight);
-            right = Progress.Left - pad;
-        }
-
-        Label.SetBounds(pad, 0, Math.Max(10, right - pad), ClientSize.Height);
-    }
-}
-
-/// <summary>A rounded sidebar panel with a small uppercase title, like FrameGrabber's sections.</summary>
-sealed class Card : Panel
-{
-    string title = "";
-    string detail = "";
-
-    public Card()
-    {
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        BackColor = Theme.Background;
-    }
-
-    public string Title
-    {
-        get => title;
-        set { title = value; AccessibleName = value; Invalidate(); }
-    }
-
-    /// <summary>Muted text on the right of the title, such as a count.</summary>
-    public string Detail
-    {
-        get => detail;
-        set { if (detail == value) return; detail = value; Invalidate(); }
-    }
-
-    public int Pad => LogicalToDeviceUnits(14);
-    public int ContentTop => Pad + LogicalToDeviceUnits(22);
-    public Rectangle ContentBounds => new(Pad, ContentTop, Math.Max(1, ClientSize.Width - Pad * 2), Math.Max(1, ClientSize.Height - ContentTop - Pad));
 
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.Clear(Theme.Background);
+        PaintBase(g);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var path = PaintUtil.Rounded(new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1), LogicalToDeviceUnits(14));
-        using var brush = new SolidBrush(Theme.Surface);
-        g.FillPath(brush, path);
-        var header = new Rectangle(Pad, Pad - LogicalToDeviceUnits(2), ClientSize.Width - Pad * 2, LogicalToDeviceUnits(18));
-        TextRenderer.DrawText(g, title.ToUpperInvariant(), Theme.Ui(8, FontStyle.Bold), header, Theme.Muted,
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
-        if (detail.Length > 0)
-            TextRenderer.DrawText(g, detail, Theme.Ui(8.5f), header, Theme.Muted,
-                TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        if (ClientSize.Width < 20 || ClientSize.Height < 20) return;
+        PaintUtil.Panel(g, ClientRectangle, S(16));
+        var top = BlockTop();
+        TextRenderer.DrawText(g, "Drop a video to trim", Theme.Ui(20, FontStyle.Bold), new Rectangle(0, top, ClientSize.Width, S(36)), Theme.Text,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        TextRenderer.DrawText(g, "mkv, mp4, mov, avi, webm, ts, m2ts, wmv", Theme.Ui(10), new Rectangle(S(8), top + S(40), ClientSize.Width - S(16), S(24)), Theme.Muted,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+    }
+
+    int BlockTop() => Math.Max(S(16), (ClientSize.Height - S(140)) / 2);
+}
+
+enum StatusKind { Info, Busy, Good, Error }
+
+/// <summary>
+/// The bar under the title bar: the file and its details on the left, the status in the middle, Open and the ⋯ menu
+/// on the right. It replaces both the old toolbar and the status bar.
+/// </summary>
+sealed class TopBar : GlassControl
+{
+    public GlassLabel FileName { get; }
+    public GlassLabel Meta { get; }
+    public GlassLabel Status { get; }
+    public GlassButton Open { get; }
+    public GlassButton More { get; }
+
+    Color dot = Theme.Good;
+    Rectangle dotRect;
+
+    public TopBar()
+    {
+        FileName = new GlassLabel { Text = "VideoTrimmer", Font = Theme.Ui(10, FontStyle.Bold), AccessibleName = "File name" };
+        Meta = new GlassLabel { ForeColor = Theme.Muted, Font = Theme.Ui(9), AccessibleName = "Video details" };
+        Status = new GlassLabel { ForeColor = Theme.Muted, Font = Theme.Ui(9), Align = ContentAlignment.MiddleRight, AccessibleName = "Status" };
+        Open = new GlassButton { Text = "Open", AccessibleName = "Open a video" };
+        More = new GlassButton { Kind = ButtonKind.Quiet, Icon = Icon.More, AccessibleName = "More: shortcuts, updates, about" };
+        Controls.AddRange([FileName, Meta, Status, Open, More]);
+    }
+
+    public void SetStatus(string text, StatusKind kind)
+    {
+        Status.Text = text;
+        Status.AccessibleName = text;
+        Status.ForeColor = kind switch
+        {
+            StatusKind.Error => Theme.Caution,
+            StatusKind.Busy or StatusKind.Good => Theme.Text,
+            _ => Theme.Muted,
+        };
+        dot = kind switch
+        {
+            StatusKind.Error => Theme.Caution,
+            StatusKind.Busy => Theme.Accent,
+            _ => Theme.Good,
+        };
+        PerformLayout();
+        Invalidate();
+    }
+
+    protected override void OnLayout(LayoutEventArgs levent)
+    {
+        base.OnLayout(levent);
+        var pad = S(14);
+        var height = S(30);
+        var y = (ClientSize.Height - height) / 2;
+        More.SetBounds(ClientSize.Width - S(8) - S(34), y, S(34), height);
+        var openWidth = Open.PreferredWidth();
+        Open.SetBounds(More.Left - S(6) - openWidth, y, openWidth, height);
+
+        var left = pad + S(18) + S(10);
+        var room = Math.Max(S(40), Open.Left - S(14) - left);
+        var statusWidth = Math.Min(Status.MeasureWidth() + S(2), Math.Max(S(60), room * 45 / 100));
+        Status.SetBounds(Open.Left - S(14) - statusWidth, 0, statusWidth, ClientSize.Height - 1);
+        dotRect = new Rectangle(Status.Left - S(13), (ClientSize.Height - S(6)) / 2, S(6), S(6));
+
+        var textRoom = Math.Max(S(20), dotRect.Left - S(14) - left);
+        var nameWidth = Math.Min(FileName.MeasureWidth() + S(2), Meta.Text.Length > 0 ? textRoom * 60 / 100 : textRoom);
+        FileName.SetBounds(left, 0, nameWidth, ClientSize.Height - 1);
+        Meta.SetBounds(FileName.Right + S(12), 0, Math.Max(0, left + textRoom - FileName.Right - S(12)), ClientSize.Height - 1);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        PaintBase(g);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        Icons.Draw(g, Icon.Split, new RectangleF(S(14), (ClientSize.Height - S(18)) / 2f, S(18), S(18)), Theme.Accent);
+        if (Status.Text.Length > 0)
+        {
+            using var brush = new SolidBrush(dot);
+            g.FillEllipse(brush, dotRect);
+        }
+
+        using var line = new Pen(Theme.Hairline);
+        g.DrawLine(line, 0, ClientSize.Height - 1, ClientSize.Width, ClientSize.Height - 1);
     }
 }
 
@@ -541,7 +693,7 @@ readonly record struct SegmentClick(int Index, Keys Modifiers);
 /// Click a row to edit that segment; Ctrl+click and Shift+click pick several for export. Its × removes it.
 /// Scrolls with the mouse wheel.
 /// </summary>
-sealed class SegmentList : Control
+sealed class SegmentList : GlassControl
 {
     IReadOnlyList<Segment> segments = [];
     IReadOnlySet<int> picked = new HashSet<int>();
@@ -556,14 +708,12 @@ sealed class SegmentList : Control
 
     public SegmentList()
     {
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        BackColor = Theme.Surface;
         AccessibleName = "Segments";
         AccessibleRole = AccessibleRole.List;
     }
 
-    int RowHeight => LogicalToDeviceUnits(46);
-    int Gap => LogicalToDeviceUnits(6);
+    int RowHeight => S(46);
+    int Gap => S(4);
     int Stride => RowHeight + Gap;
     int MaxScroll => Math.Max(0, segments.Count * Stride - Gap - ClientSize.Height);
 
@@ -590,14 +740,14 @@ sealed class SegmentList : Control
         else if (top + RowHeight > scroll + ClientSize.Height) scroll = top + RowHeight - ClientSize.Height;
     }
 
-    Rectangle RowRect(int index) => new(0, index * Stride - scroll, ClientSize.Width - LogicalToDeviceUnits(6), RowHeight);
+    Rectangle RowRect(int index) => new(0, index * Stride - scroll, ClientSize.Width - (MaxScroll > 0 ? S(8) : 0), RowHeight);
 
-    Rectangle CloseRect(Rectangle row) => new(row.Right - LogicalToDeviceUnits(32), row.Top, LogicalToDeviceUnits(28), row.Height);
+    Rectangle CloseRect(Rectangle row) => new(row.Right - S(34), row.Top, S(30), row.Height);
 
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.Clear(Theme.Surface);
+        PaintBase(g);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         var normalized = CutList.Normalize(segments, long.MaxValue);
         for (var i = 0; i < segments.Count; i++)
@@ -611,10 +761,9 @@ sealed class SegmentList : Control
         {
             // A thin scroll thumb on the right edge.
             var track = ClientSize.Height;
-            var thumb = Math.Max(LogicalToDeviceUnits(24), track * track / (MaxScroll + track));
+            var thumb = Math.Max(S(24), track * track / (MaxScroll + track));
             var top = (int)((track - thumb) * (scroll / (double)MaxScroll));
-            using var brush = new SolidBrush(Theme.Border);
-            g.FillRectangle(brush, ClientSize.Width - LogicalToDeviceUnits(3), top, LogicalToDeviceUnits(3), thumb);
+            PaintUtil.Fill(g, new RectangleF(ClientSize.Width - S(3), top, S(3), thumb), S(2), Color.FromArgb(56, 255, 255, 255));
         }
     }
 
@@ -625,42 +774,51 @@ sealed class SegmentList : Control
         var multi = picked.Count > 0;
         var inPick = multi && (selected || picked.Contains(index));
         var hovered = index == hover;
-        var fill = selected ? Theme.Mix(Theme.Surface, Theme.Accent, 0.28f)
-            : inPick ? Theme.Mix(Theme.Surface, Theme.Accent, 0.14f)
-            : hovered ? Theme.Lift(Theme.Background, 10) : Theme.Background;
-        var border = selected ? Theme.Accent : inPick ? Theme.Mix(Theme.Border, Theme.Accent, 0.6f) : Theme.Border;
-        using (var path = PaintUtil.Rounded(new Rectangle(row.X, row.Y, row.Width - 1, row.Height - 1), LogicalToDeviceUnits(10)))
-        using (var brush = new SolidBrush(fill))
-        using (var pen = new Pen(border, selected || inPick ? 2 : 1))
+        var rect = new RectangleF(row.X + 0.5f, row.Y + 0.5f, row.Width - 1, row.Height - 1);
+        // The selected row is the only filled one, so it reads at a glance; the others are bare until hovered.
+        if (selected)
         {
-            g.FillPath(brush, path);
-            g.DrawPath(pen, path);
+            PaintUtil.Fill(g, rect, S(10), Theme.Alpha(Theme.Accent, 46));
+            PaintUtil.Stroke(g, rect, S(10), Theme.Accent);
+        }
+        else if (inPick)
+        {
+            PaintUtil.Fill(g, rect, S(10), Theme.Alpha(Theme.Accent, 24));
+            PaintUtil.Stroke(g, rect, S(10), Theme.Alpha(Theme.Accent, 140));
+        }
+        else if (hovered)
+        {
+            PaintUtil.Fill(g, rect, S(10), Theme.ControlFill);
         }
 
         // Picked rows show a check instead of their number, so the export choice reads at a glance.
-        var badgeSize = LogicalToDeviceUnits(24);
-        var badge = new Rectangle(row.Left + LogicalToDeviceUnits(10), row.Top + (row.Height - badgeSize) / 2, badgeSize, badgeSize);
-        using (var badgeBrush = new SolidBrush(selected || inPick ? Theme.Accent : Theme.Surface))
+        var badgeSize = S(22);
+        var badge = new Rectangle(row.Left + S(10), row.Top + (row.Height - badgeSize) / 2, badgeSize, badgeSize);
+        var marked = selected || inPick;
+        using (var badgeBrush = new SolidBrush(marked ? Theme.Accent : Color.FromArgb(26, 255, 255, 255)))
             g.FillEllipse(badgeBrush, badge);
-        TextRenderer.DrawText(g, inPick ? "✓" : (index + 1).ToString(), Theme.Ui(8.5f, FontStyle.Bold), badge, selected || inPick ? Color.White : Theme.Text,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        if (inPick)
+            Icons.Draw(g, Icon.Check, RectangleF.Inflate(badge, -S(5), -S(5)), Theme.OnAccent, 3.2f);
+        else
+            TextRenderer.DrawText(g, (index + 1).ToString(), Theme.Ui(8.5f, FontStyle.Bold), badge, marked ? Theme.OnAccent : Theme.Text,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
 
-        var textLeft = badge.Right + LogicalToDeviceUnits(10);
+        var textLeft = badge.Right + S(10);
         var close = segments.Count > 1 ? CloseRect(row) : Rectangle.Empty;
-        var textRight = (close.IsEmpty ? row.Right : close.Left) - LogicalToDeviceUnits(4);
+        var textRight = (close.IsEmpty ? row.Right : close.Left) - S(4);
         var half = row.Height / 2;
-        var times = new Rectangle(textLeft, row.Top + LogicalToDeviceUnits(4), textRight - textLeft, half - LogicalToDeviceUnits(2));
-        TextRenderer.DrawText(g, $"{TimeMath.Format(segment.In, fps)} → {TimeMath.Format(segment.Out, fps)}", Theme.Mono(9.5f), times, Theme.Text,
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var times = new Rectangle(textLeft, row.Top + S(5), textRight - textLeft, half - S(3));
+        TextRenderer.DrawText(g, $"{TimeMath.Format(segment.In, fps)} → {TimeMath.Format(segment.Out, fps)}", Theme.Mono(9), times, Theme.Text, Line | TextFormatFlags.Left);
         var at = CutList.EditedFrame(normalized, segment.In);
-        var info = new Rectangle(textLeft, row.Top + half, textRight - textLeft, half - LogicalToDeviceUnits(4));
-        TextRenderer.DrawText(g, $"{TimeMath.Format(segment.Length, fps)} long  ·  at {TimeMath.Format(at, fps)} in export", Theme.Ui(8.5f), info, Theme.Muted,
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var info = new Rectangle(textLeft, row.Top + half, textRight - textLeft, half - S(5));
+        TextRenderer.DrawText(g, $"{TimeMath.Format(segment.Length, fps)} long  ·  at {TimeMath.Format(at, fps)} in export", Theme.Ui(8.5f), info,
+            selected ? Color.FromArgb(214, 219, 228) : Theme.Muted, Line | TextFormatFlags.Left);
 
         if (!close.IsEmpty && (hovered || selected))
         {
-            var color = hovered && hoverClose ? Theme.OutPoint : Theme.Muted;
-            TextRenderer.DrawText(g, "×", Theme.Ui(13, FontStyle.Bold), close, color, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            var size = S(12);
+            Icons.Draw(g, Icon.Close, new RectangleF(close.Left + (close.Width - size) / 2f, close.Top + (close.Height - size) / 2f, size, size),
+                hovered && hoverClose ? Theme.Caution : Theme.Muted, 2.4f);
         }
     }
 
@@ -721,233 +879,195 @@ sealed class SegmentList : Control
 }
 
 /// <summary>In and out of the selected segment: set at the playhead, type a timecode or frame, or nudge a frame.</summary>
-sealed class SegmentEditor : Panel
+sealed class SegmentEditor : GlassControl
 {
-    public FlatButton SetIn { get; }
-    public FlatButton SetOut { get; }
+    public GlassButton SetIn { get; }
+    public GlassButton SetOut { get; }
     public DarkField InTime { get; }
     public DarkField InFrame { get; }
     public DarkField OutTime { get; }
     public DarkField OutFrame { get; }
-    public FlatButton InEarlier { get; }
-    public FlatButton InLater { get; }
-    public FlatButton OutEarlier { get; }
-    public FlatButton OutLater { get; }
-    public Label Selected { get; }
+    public GlassButton InEarlier { get; }
+    public GlassButton InLater { get; }
+    public GlassButton OutEarlier { get; }
+    public GlassButton OutLater { get; }
 
     public SegmentEditor()
     {
-        BackColor = Theme.Surface;
-        SetIn = Edge("In", "Set in point", Theme.InPoint);
-        SetOut = Edge("Out", "Set out point", Theme.OutPoint);
+        OnPanel = true;
+        SetIn = new GlassButton { Text = "In", AccessibleName = "Set in point", OnPanel = true };
+        SetOut = new GlassButton { Text = "Out", AccessibleName = "Set out point", OnPanel = true };
         InTime = Field("In timecode");
         InFrame = Field("In frame");
         OutTime = Field("Out timecode");
         OutFrame = Field("Out frame");
-        InEarlier = Nudge("−", "Move in point one frame earlier");
-        InLater = Nudge("+", "Move in point one frame later");
-        OutEarlier = Nudge("−", "Move out point one frame earlier");
-        OutLater = Nudge("+", "Move out point one frame later");
-        Selected = new Label
-        {
-            AutoEllipsis = true,
-            ForeColor = Theme.Text,
-            BackColor = Theme.Surface,
-            Font = Theme.Ui(9.5f, FontStyle.Bold),
-            TextAlign = ContentAlignment.MiddleLeft,
-        };
-        Controls.AddRange([SetIn, InTime, InFrame, InEarlier, InLater, SetOut, OutTime, OutFrame, OutEarlier, OutLater, Selected]);
+        InEarlier = Nudge(Icon.Minus, "Move in point one frame earlier");
+        InLater = Nudge(Icon.Plus, "Move in point one frame later");
+        OutEarlier = Nudge(Icon.Minus, "Move out point one frame earlier");
+        OutLater = Nudge(Icon.Plus, "Move out point one frame later");
+        Controls.AddRange([SetIn, InTime, InFrame, InEarlier, InLater, SetOut, OutTime, OutFrame, OutEarlier, OutLater]);
     }
 
-    public int MeasureHeight() => LogicalToDeviceUnits(34) * 2 + LogicalToDeviceUnits(8) * 2 + LogicalToDeviceUnits(22);
+    public int MeasureHeight() => S(32) * 2 + S(6);
+
+    protected override void OnPaint(PaintEventArgs e) => PaintBase(e.Graphics);
 
     protected override void OnLayout(LayoutEventArgs levent)
     {
         base.OnLayout(levent);
-        var gap = LogicalToDeviceUnits(8);
-        var rowHeight = LogicalToDeviceUnits(34);
+        var rowHeight = S(32);
         LayoutEdge(0, rowHeight, SetIn, InTime, InFrame, InEarlier, InLater);
-        LayoutEdge(rowHeight + gap, rowHeight, SetOut, OutTime, OutFrame, OutEarlier, OutLater);
-        Selected.SetBounds(0, (rowHeight + gap) * 2, ClientSize.Width, LogicalToDeviceUnits(22));
+        LayoutEdge(rowHeight + S(6), rowHeight, SetOut, OutTime, OutFrame, OutEarlier, OutLater);
     }
 
-    void LayoutEdge(int y, int height, FlatButton edge, DarkField time, DarkField frame, FlatButton earlier, FlatButton later)
+    void LayoutEdge(int y, int height, GlassButton edge, DarkField time, DarkField frame, GlassButton earlier, GlassButton later)
     {
-        var gap = LogicalToDeviceUnits(6);
-        var nudge = LogicalToDeviceUnits(30);
-        var edgeWidth = LogicalToDeviceUnits(48);
-        var frameWidth = LogicalToDeviceUnits(74);
+        var gap = S(6);
+        var nudge = S(30);
         later.SetBounds(ClientSize.Width - nudge, y, nudge, height);
-        earlier.SetBounds(later.Left - gap - nudge, y, nudge, height);
-        edge.SetBounds(0, y, edgeWidth, height);
-        frame.SetBounds(earlier.Left - gap - frameWidth, y, frameWidth, height);
+        earlier.SetBounds(later.Left - S(4) - nudge, y, nudge, height);
+        edge.SetBounds(0, y, S(52), height);
+        frame.SetBounds(earlier.Left - gap - S(74), y, S(74), height);
         time.SetBounds(edge.Right + gap, y, Math.Max(40, frame.Left - gap - edge.Right - gap), height);
     }
 
-    static FlatButton Edge(string text, string name, Color color) => new()
-    {
-        Text = text,
-        AccessibleName = name,
-        TextColor = color,
-        BackColor = Theme.Surface,
-    };
-
     static DarkField Field(string name)
     {
-        var field = new DarkField();
+        var field = new DarkField { OnPanel = true };
         field.Box.AccessibleName = name;
         return field;
     }
 
-    static FlatButton Nudge(string text, string name) => new()
-    {
-        Text = text,
-        AccessibleName = name,
-        Font = Theme.Ui(12, FontStyle.Bold),
-        BackColor = Theme.Surface,
-    };
+    static GlassButton Nudge(Icon icon, string name) => new() { Icon = icon, AccessibleName = name, OnPanel = true };
 }
 
-/// <summary>Fast copy or exact frames, the exact-mode presets, an explanation, and the Export button, stacked for the sidebar.</summary>
-sealed class ExportBar : Panel
+/// <summary>
+/// Fast copy or exact frames, the exact-mode options, the output format, a one-line explanation and the Export button.
+/// Each option is a row: a muted label on the left, its control on the right.
+/// </summary>
+sealed class ExportBar : GlassControl
 {
-    public OptionCard Fast { get; }
-    public OptionCard Exact { get; }
-    public OptionCard QualityHigh { get; }
-    public OptionCard QualityBalanced { get; }
-    public OptionCard QualitySmall { get; }
-    public OptionCard CopyAudio { get; }
-    public OptionCard Subtitles { get; }
-    public FlatButton Export { get; }
-    public FlatButton Cancel { get; }
-    public Label Explanation { get; }
+    public Segmented Mode { get; }
+    public Segmented Quality { get; }
+    public ToggleSwitch CopyAudio { get; }
+    public GlassButton Subtitles { get; }
+    public GlassButton Format { get; }
+    public GlassButton Export { get; }
+    public GlassButton Cancel { get; }
+    public GlassLabel Explanation { get; }
 
+    static readonly ExactQuality[] Qualities = [ExactQuality.High, ExactQuality.Balanced, ExactQuality.Small];
+
+    readonly List<(string Label, Rectangle Row)> rows = new();
     bool exactMode;
     ExactQuality quality = ExactExportOptions.Default.Quality;
     bool copyAudio;
     IReadOnlyList<SubtitleTrack> subtitleTracks = [];
     SubtitleTrack? burn;
+    OutputFormat format;
+    string sourceExtension = "";
     int segments = 1;
-    bool optionsEnabled = true;
+    bool busy;
 
     public ExportBar()
     {
-        BackColor = Theme.Surface;
-        Fast = Option(ExportModeCopy.FastTitle, ExportModeCopy.FastExplanation, visible: true);
-        Exact = Option(ExportModeCopy.ExactTitle, ExportModeCopy.ExactBaseExplanation, visible: true);
-        QualityHigh = Option(ExactExportPresets.Title(ExactQuality.High), ExactExportPresets.Hint(ExactQuality.High), visible: false);
-        QualityBalanced = Option(ExactExportPresets.Title(ExactQuality.Balanced), ExactExportPresets.Hint(ExactQuality.Balanced), visible: false);
-        QualitySmall = Option(ExactExportPresets.Title(ExactQuality.Small), ExactExportPresets.Hint(ExactQuality.Small), visible: false);
-        CopyAudio = Option(ExportModeCopy.CopyAudioTitle, ExactExportPresets.AudioHint(true), visible: false);
-        Subtitles = Option(ExportModeCopy.SubtitlesOffTitle, ExactExportPresets.SubtitleHint(null), visible: false);
-        Export = new FlatButton { Text = "Export…", Primary = true, AccessibleName = "Export", Enabled = false, BackColor = Theme.Surface };
-        Cancel = new FlatButton { Text = "Cancel", AccessibleName = "Cancel export", Enabled = false, Visible = false, TextColor = Theme.OutPoint, BackColor = Theme.Surface };
-        Explanation = new Label
-        {
-            ForeColor = Theme.Muted,
-            BackColor = Theme.Surface,
-            Font = Theme.Ui(9),
-            TextAlign = ContentAlignment.TopLeft,
-        };
-        Controls.AddRange([Fast, Exact, QualityHigh, QualityBalanced, QualitySmall, CopyAudio, Subtitles, Export, Cancel, Explanation]);
+        OnPanel = true;
+        Mode = new Segmented { Items = [ExportModeCopy.FastTitle, ExportModeCopy.ExactTitle], AccessibleName = "Export mode", OnPanel = true };
+        Quality = new Segmented { Items = Qualities.Select(ExactExportPresets.Title).ToArray(), Font = Theme.Ui(9), AccessibleName = "Quality", Visible = false, OnPanel = true };
+        CopyAudio = new ToggleSwitch { Text = ExportModeCopy.CopyAudioTitle, AccessibleName = ExportModeCopy.CopyAudioTitle, Visible = false, OnPanel = true };
+        Subtitles = new GlassButton { AlignLeft = true, Chevron = true, Font = Theme.Ui(9.5f), AccessibleName = "Burn in subtitles", Visible = false, OnPanel = true };
+        Format = new GlassButton { AlignLeft = true, Chevron = true, Font = Theme.Ui(9.5f), AccessibleName = "Output format", OnPanel = true };
+        Export = new GlassButton { Text = "Export…", Kind = ButtonKind.Primary, AccessibleName = "Export", Enabled = false, OnPanel = true };
+        Cancel = new GlassButton { Text = "Cancel", Kind = ButtonKind.Caution, AccessibleName = "Cancel export", Enabled = false, Visible = false, OnPanel = true };
+        Explanation = new GlassLabel { ForeColor = Theme.Muted, Font = Theme.Ui(9), Wrap = true, OnPanel = true };
+        Controls.AddRange([Mode, Quality, CopyAudio, Subtitles, Format, Explanation, Export, Cancel]);
 
-        QualityHigh.Click += (_, _) => SetQuality(ExactQuality.High);
-        QualityBalanced.Click += (_, _) => SetQuality(ExactQuality.Balanced);
-        QualitySmall.Click += (_, _) => SetQuality(ExactQuality.Small);
-        CopyAudio.Click += (_, _) => SetCopyAudio(!copyAudio);
+        Mode.Picked += index => ModePicked?.Invoke(index == 1);
+        Quality.Picked += index => SetQuality(Qualities[index]);
+        CopyAudio.Toggled += SetCopyAudio;
         Subtitles.Click += (_, _) => ChooseSubtitles();
+        Format.Click += (_, _) => ChooseFormat();
 
         SetMode(false);
     }
 
-    static OptionCard Option(string title, string description, bool visible) => new()
-    {
-        Title = title,
-        AccessibleDescription = description,
-        Visible = visible,
-        BackColor = Theme.Surface,
-    };
+    /// <summary>The user picked Fast copy (false) or Exact frames (true).</summary>
+    public event Action<bool>? ModePicked;
+
+    /// <summary>An option changed in a way that can change this bar's height.</summary>
+    public event EventHandler? OptionsChanged;
 
     public ExactExportOptions ExactOptions => new(quality, copyAudio, burn);
 
-    bool HasSubtitles => subtitleTracks.Count > 0;
+    public OutputFormat OutputFormat => format;
 
-    public event EventHandler? ExactOptionsChanged;
+    bool HasSubtitles => subtitleTracks.Count > 0;
 
     public void SetMode(bool exact)
     {
         exactMode = exact;
-        Fast.Selected = !exact;
-        Exact.Selected = exact;
-        QualityHigh.Visible = exact;
-        QualityBalanced.Visible = exact;
-        QualitySmall.Visible = exact;
+        Mode.SelectedIndex = exact ? 1 : 0;
+        Quality.Visible = exact;
         CopyAudio.Visible = exact;
         Subtitles.Visible = exact && HasSubtitles;
-        SyncExactSelection();
-        RefreshExplanation();
+        Sync();
+        PerformLayout();
+        Invalidate();
+    }
+
+    /// <summary>While an export runs, the options lock and Cancel shows beside the progress.</summary>
+    public void SetBusy(bool value)
+    {
+        busy = value;
+        Mode.Enabled = !value;
+        Format.Enabled = !value;
+        Cancel.Enabled = value;
+        Cancel.Visible = value;
+        if (!value) Export.Progress = -1;
+        Sync();
         PerformLayout();
     }
 
-    public void SetExactOptionsEnabled(bool enabled)
+    /// <summary>A new video starts with nothing burned in and its own container as the format's reference.</summary>
+    public void SetSource(string extension, IReadOnlyList<SubtitleTrack> tracks)
     {
-        optionsEnabled = enabled;
-        QualityHigh.Enabled = enabled;
-        QualityBalanced.Enabled = enabled;
-        QualitySmall.Enabled = enabled;
-        // A multi-segment re-encode joins audio in a filter graph, so it cannot be copied.
-        CopyAudio.Enabled = enabled && segments == 1;
-        Subtitles.Enabled = enabled;
-    }
-
-    /// <summary>A new video starts with nothing burned in. The option only appears when the video has subtitle tracks.</summary>
-    public void SetSubtitleTracks(IReadOnlyList<SubtitleTrack> tracks)
-    {
+        sourceExtension = extension;
         subtitleTracks = tracks;
         burn = null;
         SetMode(exactMode);
-        ExactOptionsChanged?.Invoke(this, EventArgs.Empty);
+        OptionsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public void SetSegmentCount(int count)
     {
         if (segments == count) return;
         segments = count;
-        SetExactOptionsEnabled(optionsEnabled);
-        RefreshExplanation();
+        Sync();
     }
+
+    const int RowHeight = 32;
 
     public int MeasureHeight(int width)
     {
-        var gap = LogicalToDeviceUnits(8);
-        var height = LogicalToDeviceUnits(36) + gap;
-        if (exactMode) height += (LogicalToDeviceUnits(32) + gap) * (HasSubtitles ? 3 : 2);
-        height += ExplanationHeight(width) + gap + LogicalToDeviceUnits(38);
+        var height = S(36) + S(8);
+        var optionRows = 1 + (exactMode ? 2 + (HasSubtitles ? 1 : 0) : 0);
+        height += optionRows * S(RowHeight) + (optionRows - 1) * S(4);
+        height += S(10) + Explanation.MeasureHeight(width) + S(12) + S(40);
         return height;
-    }
-
-    int ExplanationHeight(int width)
-    {
-        var size = TextRenderer.MeasureText(Explanation.Text, Explanation.Font, new Size(Math.Max(40, width), int.MaxValue), TextFormatFlags.WordBreak);
-        return size.Height + LogicalToDeviceUnits(2);
     }
 
     void SetQuality(ExactQuality value)
     {
         if (!exactMode || quality == value) return;
         quality = value;
-        SyncExactSelection();
-        RefreshExplanation();
-        ExactOptionsChanged?.Invoke(this, EventArgs.Empty);
+        Sync();
     }
 
     void SetCopyAudio(bool value)
     {
         if (!exactMode || copyAudio == value || segments > 1) return;
         copyAudio = value;
-        SyncExactSelection();
-        RefreshExplanation();
-        ExactOptionsChanged?.Invoke(this, EventArgs.Empty);
+        Sync();
     }
 
     /// <summary>One track toggles on and off; several open a menu to pick which one.</summary>
@@ -960,158 +1080,279 @@ sealed class ExportBar : Panel
             return;
         }
 
-        var menu = new ContextMenuStrip { Renderer = new ToolStripProfessionalRenderer(new MenuColors()), ShowImageMargin = false, ShowCheckMargin = true, Font = Theme.Ui(9.5f) };
-        menu.Items.Add(MenuItem("Don't burn in", null));
-        foreach (var track in subtitleTracks) menu.Items.Add(MenuItem(track.Label, track));
-        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
-        menu.Show(Subtitles, new Point(0, Subtitles.Height));
+        var menu = Menus.Create();
+        menu.Items.Add(Menus.Item("Don't burn in", burn is null, () => SetBurn(null)));
+        foreach (var track in subtitleTracks)
+            menu.Items.Add(Menus.Item(track.Label, burn == track, () => SetBurn(track)));
+        Menus.ShowBelow(menu, Subtitles);
+    }
 
-        ToolStripMenuItem MenuItem(string text, SubtitleTrack? track)
+    void ChooseFormat()
+    {
+        var menu = Menus.Create();
+        foreach (var option in OutputFormats.All)
         {
-            var item = new ToolStripMenuItem(text) { Checked = burn == track, ForeColor = Theme.Text };
-            item.Click += (_, _) => SetBurn(track);
-            return item;
+            var text = option == OutputFormat.Source ? $"Same as source ({OutputFormats.Label(sourceExtension)})" : OutputFormats.Name(option);
+            menu.Items.Add(Menus.Item(text, format == option, () => SetFormat(option)));
         }
+
+        Menus.ShowBelow(menu, Format);
+    }
+
+    void SetFormat(OutputFormat value)
+    {
+        if (format == value) return;
+        format = value;
+        Sync();
+        OptionsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     void SetBurn(SubtitleTrack? value)
     {
         if (burn == value) return;
         burn = value;
-        SyncExactSelection();
-        RefreshExplanation();
-        ExactOptionsChanged?.Invoke(this, EventArgs.Empty);
+        Sync();
+        OptionsChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    void SyncExactSelection()
+    /// <summary>True when the export goes into a different container from the source's.</summary>
+    public bool Converts => format != OutputFormat.Source
+        && !OutputFormats.Extension(format, sourceExtension).Equals(sourceExtension, StringComparison.OrdinalIgnoreCase);
+
+    void Sync()
     {
-        QualityHigh.Selected = quality == ExactQuality.High;
-        QualityBalanced.Selected = quality == ExactQuality.Balanced;
-        QualitySmall.Selected = quality == ExactQuality.Small;
-        CopyAudio.Selected = copyAudio;
+        Quality.SelectedIndex = Array.IndexOf(Qualities, quality);
+        Quality.Enabled = !busy;
+        CopyAudio.Checked = copyAudio && segments == 1;
+        // A multi-segment re-encode joins audio in a filter graph, so it cannot be copied.
+        CopyAudio.Enabled = !busy && segments == 1;
         CopyAudio.AccessibleDescription = ExactExportPresets.AudioHint(copyAudio);
-        Subtitles.Selected = burn is not null;
-        Subtitles.Title = burn is { } track ? "Subtitles: " + track.Label : ExportModeCopy.SubtitlesOffTitle;
+        Subtitles.Enabled = !busy;
+        Subtitles.Text = burn is { } track ? track.Label : "Off";
         Subtitles.AccessibleDescription = ExactExportPresets.SubtitleHint(burn);
+        Subtitles.Invalidate();
+        Format.Text = format == OutputFormat.Source ? "Same as source" : OutputFormats.Name(format);
+        Format.Detail = sourceExtension.Length == 0 ? ""
+            : format == OutputFormat.Source ? OutputFormats.Label(sourceExtension)
+            : Converts ? "source is " + OutputFormats.Label(sourceExtension) : "same as source";
+        Format.Invalidate();
+        var text = ExportModeCopy.Summary(exactMode, ExactOptions, segments, Converts ? OutputFormats.Name(format) : null)
+            + (!exactMode && HasSubtitles ? " " + ExportModeCopy.FastSubtitlesHint : "");
+        if (Explanation.Text != text)
+        {
+            Explanation.Text = text;
+            Explanation.AccessibleName = text;
+            OptionsChanged?.Invoke(this, EventArgs.Empty);
+        }
     }
 
-    void RefreshExplanation()
+    protected override void OnPaint(PaintEventArgs e)
     {
-        Explanation.Text = ExportModeCopy.Explanation(exactMode, ExactOptions, segments)
-            + (!exactMode && HasSubtitles ? " " + ExportModeCopy.FastSubtitlesHint : "");
-        Explanation.AccessibleName = Explanation.Text;
-        ExactOptionsChanged?.Invoke(this, EventArgs.Empty);
+        PaintBase(e.Graphics);
+        foreach (var (label, row) in rows)
+            TextRenderer.DrawText(e.Graphics, label, Theme.Ui(9.5f), new Rectangle(0, row.Top, S(70), row.Height), Theme.Muted, Line | TextFormatFlags.Left);
     }
 
     protected override void OnLayout(LayoutEventArgs levent)
     {
         base.OnLayout(levent);
-        var gap = LogicalToDeviceUnits(8);
         var width = ClientSize.Width;
-        var half = (width - gap) / 2;
+        var labelWidth = S(74);
         var y = 0;
-        Fast.SetBounds(0, y, half, LogicalToDeviceUnits(36));
-        Exact.SetBounds(half + gap, y, width - half - gap, LogicalToDeviceUnits(36));
-        y += LogicalToDeviceUnits(36) + gap;
-        if (exactMode)
+        Mode.SetBounds(0, y, width, S(36));
+        y += S(36) + S(8);
+        rows.Clear();
+
+        void Row(string label, Control control, int inset = 0)
         {
-            var row = LogicalToDeviceUnits(32);
-            var cell = (width - gap * 2) / 3;
-            QualityHigh.SetBounds(0, y, cell, row);
-            QualityBalanced.SetBounds(cell + gap, y, cell, row);
-            QualitySmall.SetBounds((cell + gap) * 2, y, width - (cell + gap) * 2, row);
-            y += row + gap;
-            CopyAudio.SetBounds(0, y, width, row);
-            y += row + gap;
-            if (HasSubtitles)
-            {
-                Subtitles.SetBounds(0, y, width, row);
-                y += row + gap;
-            }
+            var row = new Rectangle(0, y, width, S(RowHeight));
+            rows.Add((label, row));
+            control.SetBounds(labelWidth, y + inset, width - labelWidth, S(RowHeight) - inset * 2);
+            y += S(RowHeight) + S(4);
         }
 
-        var explanation = ExplanationHeight(width);
+        if (exactMode)
+        {
+            Row("Quality", Quality, S(1));
+            Row("Audio", CopyAudio);
+            if (HasSubtitles) Row("Subtitles", Subtitles, S(1));
+        }
+
+        Row("Format", Format, S(1));
+        y += S(10) - S(4);
+        var explanation = Explanation.MeasureHeight(width);
         Explanation.SetBounds(0, y, width, explanation);
-        y += explanation + gap;
-        var buttonHeight = LogicalToDeviceUnits(38);
+        y += explanation + S(12);
+        var buttonHeight = S(40);
         if (Cancel.Visible)
         {
-            var cancelWidth = LogicalToDeviceUnits(96);
+            var cancelWidth = S(92);
             Cancel.SetBounds(width - cancelWidth, y, cancelWidth, buttonHeight);
-            Export.SetBounds(0, y, Math.Max(40, Cancel.Left - gap), buttonHeight);
+            Export.SetBounds(0, y, Math.Max(40, Cancel.Left - S(8)), buttonHeight);
         }
         else
         {
             Export.SetBounds(0, y, width, buttonHeight);
         }
+
+        Invalidate();
     }
 }
 
-/// <summary>Dark colors for drop-down menus, matching the option cards.</summary>
-sealed class MenuColors : ProfessionalColorTable
+/// <summary>
+/// The sidebar: one glass panel holding the segment list, the selected segment's in and out, and the export options,
+/// separated by hairlines instead of being three cards.
+/// </summary>
+sealed class SidePanel : GlassControl
 {
-    public override Color ToolStripDropDownBackground => Theme.Surface;
-    public override Color MenuBorder => Theme.Border;
-    public override Color MenuItemBorder => Theme.Accent;
-    public override Color MenuItemSelected => Theme.Mix(Theme.Surface, Theme.Accent, 0.28f);
-    public override Color CheckBackground => Theme.Mix(Theme.Surface, Theme.Accent, 0.28f);
-    public override Color CheckSelectedBackground => Theme.Mix(Theme.Surface, Theme.Accent, 0.4f);
-    public override Color CheckPressedBackground => Theme.Mix(Theme.Surface, Theme.Accent, 0.4f);
-    public override Color ImageMarginGradientBegin => Theme.Surface;
-    public override Color ImageMarginGradientMiddle => Theme.Surface;
-    public override Color ImageMarginGradientEnd => Theme.Surface;
+    public SegmentList List { get; } = new() { OnPanel = true };
+    public SegmentEditor Editor { get; } = new();
+    public ExportBar Export { get; } = new();
+    public GlassButton Reset { get; }
+
+    string segmentsDetail = "";
+    string editorTitle = "";
+    string editorDetail = "";
+    Rectangle segmentsHeader;
+    Rectangle editorHeader;
+    Rectangle exportHeader;
+    int firstDivider;
+    int secondDivider;
+
+    public SidePanel()
+    {
+        Reset = new GlassButton
+        {
+            Text = "Reset",
+            Icon = Icon.Reset,
+            Kind = ButtonKind.Quiet,
+            Font = Theme.Ui(9),
+            ForeColor = Theme.Muted,
+            AccessibleName = "Keep the whole video as one segment",
+            OnPanel = true,
+        };
+        Controls.AddRange([Reset, List, Editor, Export]);
+    }
+
+    public int Pad => S(14);
+
+    /// <summary>Muted text beside the Segments title, such as the count and kept length.</summary>
+    public string SegmentsDetail
+    {
+        set { if (segmentsDetail == value) return; segmentsDetail = value; Invalidate(segmentsHeader); }
+    }
+
+    public string EditorTitle
+    {
+        set { if (editorTitle == value) return; editorTitle = value; Invalidate(editorHeader); }
+    }
+
+    public string EditorDetail
+    {
+        set { if (editorDetail == value) return; editorDetail = value; Invalidate(editorHeader); }
+    }
+
+    protected override void OnLayout(LayoutEventArgs levent)
+    {
+        base.OnLayout(levent);
+        var pad = Pad;
+        var inner = Math.Max(S(120), ClientSize.Width - pad * 2);
+        var title = S(22);
+        var resetWidth = Reset.PreferredWidth() - S(8);
+        Reset.SetBounds(ClientSize.Width - pad - resetWidth + S(6), pad - S(2), resetWidth, S(26));
+        segmentsHeader = new Rectangle(pad, pad, Math.Max(10, Reset.Left - S(6) - pad), title);
+
+        // The export block and the editor keep their natural heights; the list takes what is left.
+        var exportHeight = Export.MeasureHeight(inner);
+        var exportTop = ClientSize.Height - pad - exportHeight;
+        exportHeader = new Rectangle(pad, exportTop - S(8) - title, inner, title);
+        secondDivider = exportHeader.Top - S(12);
+        var editorHeight = Editor.MeasureHeight();
+        var editorTop = secondDivider - S(12) - editorHeight;
+        editorHeader = new Rectangle(pad, editorTop - S(8) - title, inner, title);
+        firstDivider = editorHeader.Top - S(12);
+        var listTop = segmentsHeader.Bottom + S(10);
+        List.SetBounds(pad, listTop, inner, Math.Max(S(40), firstDivider - S(12) - listTop));
+        Editor.SetBounds(pad, editorTop, inner, editorHeight);
+        Export.SetBounds(pad, exportTop, inner, exportHeight);
+        Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        Backdrop.Paint(g, this);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        PaintUtil.Panel(g, ClientRectangle, S(14));
+        Header(g, segmentsHeader, "Segments", segmentsDetail);
+        Header(g, editorHeader, editorTitle, editorDetail);
+        Header(g, exportHeader, "Export", "");
+        using var line = new Pen(Theme.Hairline);
+        g.DrawLine(line, Pad, firstDivider, ClientSize.Width - Pad, firstDivider);
+        g.DrawLine(line, Pad, secondDivider, ClientSize.Width - Pad, secondDivider);
+    }
+
+    void Header(Graphics g, Rectangle rect, string title, string detail)
+    {
+        var font = Theme.Ui(10, FontStyle.Bold);
+        TextRenderer.DrawText(g, title, font, rect, Theme.Text, Line | TextFormatFlags.Left);
+        if (detail.Length == 0) return;
+        var offset = TextWidth(title, font) + S(10);
+        TextRenderer.DrawText(g, detail, Theme.Ui(9), new Rectangle(rect.Left + offset, rect.Top, Math.Max(1, rect.Width - offset), rect.Height), Theme.Muted, Line | TextFormatFlags.Left);
+    }
 }
 
-/// <summary>Under the preview: jump to the previous cut, play the edit, jump to the next cut, the time readout, and zoom.</summary>
-sealed class TransportBar : Panel
+/// <summary>
+/// The dock under the preview: jump to the previous cut, play the edit, jump to the next cut, the time readout,
+/// the two tools that act at the playhead (Split and New segment), and zoom.
+/// </summary>
+sealed class TransportBar : GlassControl
 {
-    public FlatButton Previous { get; }
-    public FlatButton Play { get; }
-    public FlatButton Next { get; }
-    public Label Readout { get; }
-    public FlatButton ZoomOut { get; }
-    public FlatButton ZoomIn { get; }
-    public FlatButton Fit { get; }
-    public Label ZoomLabel { get; }
+    public GlassButton Previous { get; }
+    public GlassButton Play { get; }
+    public GlassButton Next { get; }
+    public GlassLabel Readout { get; }
+    public GlassButton Split { get; }
+    public GlassButton NewSegment { get; }
+    public GlassButton ZoomOut { get; }
+    public GlassButton ZoomIn { get; }
+    public GlassButton Fit { get; }
+    public GlassLabel ZoomLabel { get; }
+
+    int dividerX;
 
     public TransportBar()
     {
-        BackColor = Theme.Background;
-        Previous = Glyph("⏮", "Previous cut");
-        Play = new FlatButton { Text = "▶", Primary = true, Font = Theme.Symbol(12), AccessibleName = "Play the edit", TabStop = false };
-        Next = Glyph("⏭", "Next cut");
-        Readout = new Label
-        {
-            AutoEllipsis = true,
-            ForeColor = Theme.Text,
-            Font = Theme.Mono(10),
-            TextAlign = ContentAlignment.MiddleLeft,
-            AccessibleName = "Position",
-        };
-        ZoomOut = Glyph("−", "Zoom out");
-        ZoomIn = Glyph("+", "Zoom in");
-        Fit = new FlatButton { Text = "Fit", AccessibleName = "Show the whole video", TabStop = false };
-        ZoomLabel = new Label
-        {
-            ForeColor = Theme.Muted,
-            Font = Theme.Ui(9),
-            TextAlign = ContentAlignment.MiddleCenter,
-            AccessibleName = "Zoom",
-        };
-        Controls.AddRange([Previous, Play, Next, Readout, ZoomOut, ZoomLabel, ZoomIn, Fit]);
+        Previous = Tool(Icon.Previous, "Previous cut");
+        Play = new GlassButton { Icon = Icon.Play, Kind = ButtonKind.Primary, AccessibleName = "Play the edit", TabStop = false, OnPanel = true };
+        Next = Tool(Icon.Next, "Next cut");
+        Readout = new GlassLabel { Font = Theme.Mono(9.5f), AccessibleName = "Position", OnPanel = true };
+        Split = Tool(Icon.Split, "Split the segment at the playhead");
+        Split.Text = "Split";
+        Split.KeyHint = "S";
+        NewSegment = Tool(Icon.Plus, "Start a new segment at the playhead");
+        NewSegment.Text = "New segment";
+        NewSegment.KeyHint = "N";
+        ZoomOut = Tool(Icon.Minus, "Zoom out");
+        ZoomIn = Tool(Icon.Plus, "Zoom in");
+        Fit = Tool(Icon.None, "Show the whole video");
+        Fit.Text = "Fit";
+        ZoomLabel = new GlassLabel { ForeColor = Theme.Muted, Font = Theme.Ui(9), Align = ContentAlignment.MiddleCenter, AccessibleName = "Zoom", OnPanel = true };
+        Controls.AddRange([Previous, Play, Next, Readout, Split, NewSegment, ZoomOut, ZoomLabel, ZoomIn, Fit]);
     }
 
-    static FlatButton Glyph(string text, string name) => new()
+    static GlassButton Tool(Icon icon, string name) => new()
     {
-        Text = text,
-        Font = Theme.Symbol(11),
+        Icon = icon,
+        Kind = ButtonKind.Quiet,
         AccessibleName = name,
         TabStop = false,
+        OnPanel = true,
     };
 
     public void SetPlaying(bool playing)
     {
-        Play.Text = playing ? "⏸" : "▶";
+        Play.Icon = playing ? Icon.Pause : Icon.Play;
         Play.AccessibleName = playing ? "Pause" : "Play the edit";
         Play.Invalidate();
     }
@@ -1119,17 +1360,171 @@ sealed class TransportBar : Panel
     protected override void OnLayout(LayoutEventArgs levent)
     {
         base.OnLayout(levent);
-        var gap = LogicalToDeviceUnits(6);
-        var height = ClientSize.Height;
-        var button = LogicalToDeviceUnits(40);
-        Previous.SetBounds(0, 0, button, height);
-        Play.SetBounds(Previous.Right + gap, 0, LogicalToDeviceUnits(52), height);
-        Next.SetBounds(Play.Right + gap, 0, button, height);
-        var right = ClientSize.Width;
-        Fit.SetBounds(right - LogicalToDeviceUnits(52), 0, LogicalToDeviceUnits(52), height);
-        ZoomIn.SetBounds(Fit.Left - gap - LogicalToDeviceUnits(34), 0, LogicalToDeviceUnits(34), height);
-        ZoomLabel.SetBounds(ZoomIn.Left - LogicalToDeviceUnits(56), 0, LogicalToDeviceUnits(56), height);
-        ZoomOut.SetBounds(ZoomLabel.Left - LogicalToDeviceUnits(34), 0, LogicalToDeviceUnits(34), height);
-        Readout.SetBounds(Next.Right + LogicalToDeviceUnits(14), 0, Math.Max(10, ZoomOut.Left - Next.Right - LogicalToDeviceUnits(24)), height);
+        var pad = S(8);
+        var gap = S(4);
+        var height = S(36);
+        var y = (ClientSize.Height - height) / 2;
+        Previous.SetBounds(pad, y, S(36), height);
+        Play.SetBounds(Previous.Right + gap, y, S(42), height);
+        Next.SetBounds(Play.Right + gap, y, S(36), height);
+
+        var right = ClientSize.Width - pad;
+        var fitWidth = Fit.PreferredWidth() - S(4);
+        Fit.SetBounds(right - fitWidth, y, fitWidth, height);
+        ZoomIn.SetBounds(Fit.Left - S(32), y, S(32), height);
+        ZoomLabel.SetBounds(ZoomIn.Left - S(40), y, S(40), height);
+        ZoomOut.SetBounds(ZoomLabel.Left - S(32), y, S(32), height);
+        dividerX = ZoomOut.Left - S(7);
+
+        // In a narrow window the two tools drop their labels rather than squeeze the readout to nothing.
+        var compact = ClientSize.Width < S(700);
+        Split.Compact = compact;
+        NewSegment.Compact = compact;
+        // The key caps go first; the tooltips still name the keys.
+        var hints = ClientSize.Width >= S(1000);
+        Split.KeyHint = hints ? "S" : null;
+        NewSegment.KeyHint = hints ? "N" : null;
+        var newWidth = NewSegment.PreferredWidth();
+        NewSegment.SetBounds(dividerX - S(7) - newWidth, y, newWidth, height);
+        var splitWidth = Split.PreferredWidth();
+        Split.SetBounds(NewSegment.Left - gap - splitWidth, y, splitWidth, height);
+        Readout.SetBounds(Next.Right + S(12), y, Math.Max(0, Split.Left - S(12) - Next.Right - S(12)), height);
+        Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        Backdrop.Paint(g, this);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        PaintUtil.Panel(g, ClientRectangle, S(14));
+        using var line = new Pen(Theme.ControlBorder);
+        g.DrawLine(line, dividerX, (ClientSize.Height - S(22)) / 2, dividerX, (ClientSize.Height + S(22)) / 2);
+    }
+}
+
+/// <summary>Opaque dark drop-down menus.</summary>
+static class Menus
+{
+    public static ContextMenuStrip Create() => new()
+    {
+        Renderer = new ToolStripProfessionalRenderer(new MenuColors()) { RoundedEdges = false },
+        ShowImageMargin = false,
+        ShowCheckMargin = true,
+        Font = Theme.Ui(9.5f),
+        BackColor = Theme.Menu,
+        ForeColor = Theme.Text,
+    };
+
+    public static ToolStripMenuItem Item(string text, bool isChecked, Action onClick, string? shortcut = null, bool enabled = true)
+    {
+        var item = new ToolStripMenuItem(text)
+        {
+            Checked = isChecked,
+            ForeColor = enabled ? Theme.Text : Theme.Faint,
+            ShortcutKeyDisplayString = shortcut,
+            Enabled = enabled,
+            Padding = new Padding(0, 3, 0, 3),
+        };
+        item.Click += (_, _) => onClick();
+        return item;
+    }
+
+    public static ToolStripSeparator Separator() => new() { ForeColor = Theme.MenuBorder };
+
+    /// <summary>Opens the menu under <paramref name="anchor"/> and frees it once it closes.</summary>
+    public static void ShowBelow(ContextMenuStrip menu, Control anchor, bool alignRight = false)
+    {
+        menu.Closed += (_, _) => { if (anchor.IsHandleCreated) anchor.BeginInvoke(menu.Dispose); };
+        if (alignRight)
+            menu.Show(anchor, new Point(anchor.Width, anchor.Height + 2), ToolStripDropDownDirection.BelowLeft);
+        else
+            menu.Show(anchor, new Point(0, anchor.Height + 2));
+    }
+
+    sealed class MenuColors : ProfessionalColorTable
+    {
+        public override Color ToolStripDropDownBackground => Theme.Menu;
+        public override Color MenuBorder => Theme.MenuBorder;
+        public override Color MenuItemBorder => Theme.Lift(Theme.Menu, 22);
+        public override Color MenuItemSelected => Theme.Lift(Theme.Menu, 22);
+        public override Color CheckBackground => Theme.Menu;
+        public override Color CheckSelectedBackground => Theme.Lift(Theme.Menu, 22);
+        public override Color CheckPressedBackground => Theme.Lift(Theme.Menu, 22);
+        public override Color ImageMarginGradientBegin => Theme.Menu;
+        public override Color ImageMarginGradientMiddle => Theme.Menu;
+        public override Color ImageMarginGradientEnd => Theme.Menu;
+        public override Color SeparatorDark => Theme.MenuBorder;
+        public override Color SeparatorLight => Theme.Menu;
+    }
+}
+
+/// <summary>Every keyboard and mouse shortcut on one sheet, opened from the ⋯ menu or with F1.</summary>
+sealed class ShortcutsDialog : Form
+{
+    static readonly (string Keys, string Does)[] Rows =
+    [
+        ("Space", "Play or pause the edit"),
+        (",  and  .", "Previous and next cut"),
+        ("←  and  →", "Step one frame (Shift: one second)"),
+        ("Home  and  End", "Jump to the segment's in and out"),
+        ("I  and  O", "Set in and out at the playhead"),
+        ("[  and  ]", "Nudge the nearest edge one frame"),
+        ("S", "Split the segment at the playhead"),
+        ("N", "Start a new segment at the playhead"),
+        ("Delete", "Remove the selected segment"),
+        ("Ctrl+click, Shift+click", "Pick several segments to export"),
+        ("Ctrl+A,  Esc", "Pick all segments, clear the pick"),
+        ("+,  −,  0", "Zoom in, zoom out, fit"),
+        ("Ctrl+wheel", "Zoom the timeline at the pointer"),
+        ("Shift+click, Alt+click", "Set in or out on the timeline"),
+        ("Ctrl+O", "Open a video"),
+        ("F1", "Show this sheet"),
+    ];
+
+    public ShortcutsDialog()
+    {
+        Text = "Keyboard shortcuts";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.CenterParent;
+        AutoScaleMode = AutoScaleMode.None;
+        BackColor = Theme.Base;
+        ForeColor = Theme.Text;
+        KeyPreview = true;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+    }
+
+    int S(int logical) => LogicalToDeviceUnits(logical);
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        WindowChrome.Apply(this);
+        ClientSize = new Size(S(520), S(24) * 2 + Rows.Length * S(30));
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (e.KeyCode is Keys.Escape or Keys.Enter or Keys.F1) Close();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Theme.Base);
+        using var line = new Pen(Theme.Hairline);
+        var y = S(24);
+        foreach (var (keys, does) in Rows)
+        {
+            var flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.Left;
+            TextRenderer.DrawText(g, keys, Theme.Ui(9.5f, FontStyle.Bold), new Rectangle(S(28), y, S(190), S(30)), Theme.Text, flags);
+            TextRenderer.DrawText(g, does, Theme.Ui(9.5f), new Rectangle(S(226), y, ClientSize.Width - S(254), S(30)), Theme.Muted, flags);
+            y += S(30);
+            if (y < ClientSize.Height - S(24)) g.DrawLine(line, S(28), y, ClientSize.Width - S(28), y);
+        }
     }
 }

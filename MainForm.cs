@@ -5,7 +5,7 @@ namespace VideoTrimmer;
 public sealed partial class MainForm : Form
 {
     const string VideoFilter = "Video files|*.mkv;*.mp4;*.mov;*.avi;*.webm;*.ts;*.m2ts;*.wmv|All files|*.*";
-    const string ReadyHint = "Space plays the edit. S splits, N adds a segment, Delete removes one. Ctrl+wheel zooms the timeline.";
+    const string ReadyHint = "Ready";
 
     readonly FfmpegRunner runner = new();
     readonly StillCapture stills;
@@ -17,28 +17,32 @@ public sealed partial class MainForm : Form
     readonly ToolTip tips = new() { ShowAlways = true };
     readonly string? startupPath;
 
-    readonly ToolbarPanel toolbar = new();
-    readonly StatusBar statusBar = new();
+    readonly TopBar topBar = new();
     readonly DropPrompt drop = new();
     readonly Panel previewHost = new();
     readonly PictureBox preview = new();
     readonly TransportBar transport = new();
     readonly TimelineControl timeline = new();
-    readonly Card segmentsCard = new() { Title = "Segments" };
-    readonly SegmentList segmentList = new();
-    readonly FlatButton splitButton = new() { Text = "Split", AccessibleName = "Split the segment at the playhead", BackColor = Theme.Surface };
-    readonly FlatButton newButton = new() { Text = "+ Segment", AccessibleName = "Start a new segment at the playhead", BackColor = Theme.Surface };
-    readonly FlatButton resetButton = new() { Text = "Reset", AccessibleName = "Keep the whole video as one segment", BackColor = Theme.Surface };
-    readonly Card selectedCard = new() { Title = "Selected segment" };
-    readonly SegmentEditor editor = new();
-    readonly Card exportCard = new() { Title = "Export" };
-    readonly ExportBar exportBar = new();
+    readonly SidePanel side = new();
+    // The backdrop takes its color from the still, but only once the still has settled.
+    readonly System.Windows.Forms.Timer ambientTimer = new() { Interval = 350 };
+    readonly System.Windows.Forms.Timer anchorTimer = new() { Interval = 250 };
+
+    SegmentList segmentList => side.List;
+    SegmentEditor editor => side.Editor;
+    ExportBar exportBar => side.Export;
 
     CancellationTokenSource loadCts = new();
     CancellationTokenSource previewCts = new();
     CancellationTokenSource filmCts = new();
     CancellationTokenSource exportCts = new();
     CancellationTokenSource waveCts = new();
+    CancellationTokenSource anchorCts = new();
+
+    // The selected segment's own thumbnails, from its in frame to its out frame.
+    Bitmap?[]? anchorStrip;
+    (long In, long Out, int Count)? anchorKey;
+    IReadOnlyList<SubtitleTrack> subtitles = [];
 
     string? input;
     double duration;
@@ -70,9 +74,10 @@ public sealed partial class MainForm : Form
         filmstrip = new FilmstripService(runner, stills);
         player = new EditPlayer(runner, preview);
         Font = Theme.Ui(10);
-        BackColor = Theme.Background;
+        BackColor = Theme.Base;
         ForeColor = Theme.Text;
         Text = "VideoTrimmer";
+        DoubleBuffered = true;
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.None;
         KeyPreview = true;
@@ -80,6 +85,8 @@ public sealed partial class MainForm : Form
         BuildUi();
         previewTimer.Tick += (_, _) => OnPreviewTick();
         accurateTimer.Tick += (_, _) => OnAccurateTick();
+        ambientTimer.Tick += (_, _) => OnAmbientTick();
+        anchorTimer.Tick += (_, _) => OnAnchorTick();
         filmTimer.Tick += (_, _) =>
         {
             filmTimer.Stop();
@@ -98,26 +105,22 @@ public sealed partial class MainForm : Form
     {
         drop.OpenRequested += (_, _) => Browse();
         previewHost.Visible = false;
-        previewHost.BackColor = Theme.Border;
+        previewHost.BackColor = Theme.WellBorder;
         previewHost.Padding = new Padding(1);
         preview.Dock = DockStyle.Fill;
-        preview.BackColor = Theme.Background;
+        preview.BackColor = Theme.Well;
         preview.SizeMode = PictureBoxSizeMode.Zoom;
         preview.TabStop = false;
         previewHost.Controls.Add(preview);
         transport.Visible = false;
         timeline.Visible = false;
         timeline.ShowLane = WaveformEnabled;
+        side.Visible = false;
 
-        segmentsCard.Controls.AddRange([segmentList, splitButton, newButton, resetButton]);
-        selectedCard.Controls.Add(editor);
-        exportCard.Controls.Add(exportBar);
-        foreach (var card in new[] { segmentsCard, selectedCard, exportCard })
-            card.Visible = false;
+        Controls.AddRange([topBar, drop, previewHost, transport, timeline, side]);
 
-        Controls.AddRange([toolbar, drop, previewHost, transport, timeline, segmentsCard, selectedCard, exportCard, statusBar]);
-
-        toolbar.Open.Click += (_, _) => Browse();
+        topBar.Open.Click += (_, _) => Browse();
+        topBar.More.Click += (_, _) => ShowMoreMenu();
         timeline.ValuesChanged += (_, _) => OnTimelineChanged();
         timeline.InteractionEnded += (_, _) => OnTimelineInteractionEnded();
         timeline.ViewChanged += (_, _) => OnViewChanged();
@@ -128,6 +131,8 @@ public sealed partial class MainForm : Form
         transport.Play.Click += (_, _) => TogglePlayback();
         transport.Previous.Click += (_, _) => JumpCut(-1);
         transport.Next.Click += (_, _) => JumpCut(1);
+        transport.Split.Click += (_, _) => SplitSegment();
+        transport.NewSegment.Click += (_, _) => NewSegment();
         transport.ZoomIn.Click += (_, _) => timeline.ZoomBy(2);
         transport.ZoomOut.Click += (_, _) => timeline.ZoomBy(0.5);
         transport.Fit.Click += (_, _) => timeline.ZoomToFit();
@@ -138,9 +143,7 @@ public sealed partial class MainForm : Form
         };
         player.Ended += OnPlaybackEnded;
 
-        splitButton.Click += (_, _) => SplitSegment();
-        newButton.Click += (_, _) => NewSegment();
-        resetButton.Click += (_, _) => ResetSegments();
+        side.Reset.Click += (_, _) => ResetSegments();
         segmentList.SelectRequested += (_, click) => OnSegmentClicked(click);
         segmentList.RemoveRequested += (_, index) => RemoveSegment(index);
 
@@ -155,38 +158,37 @@ public sealed partial class MainForm : Form
         editor.OutTime.Box.Leave += (_, _) => CommitOut(timecode: true);
         editor.OutFrame.Box.Leave += (_, _) => CommitOut(timecode: false);
 
-        exportBar.Fast.Click += (_, _) => ChooseExact(false);
-        exportBar.Exact.Click += (_, _) => ChooseExact(true);
+        exportBar.ModePicked += ChooseExact;
         exportBar.Export.Click += (_, _) => Export();
         exportBar.Cancel.Click += (_, _) => CancelExport();
-        exportBar.ExactOptionsChanged += (_, _) => LayoutChrome();
+        exportBar.OptionsChanged += (_, _) => LayoutChrome();
         AcceptButton = exportBar.Export;
         CancelButton = exportBar.Cancel;
         ChooseExact(false);
 
+        tips.SetToolTip(topBar.Open, "Open a video (Ctrl+O)");
         tips.SetToolTip(transport.Play, "Play the kept segments back to back, as the export will join them (Space)");
         tips.SetToolTip(transport.Previous, "Previous cut (,)");
         tips.SetToolTip(transport.Next, "Next cut (.)");
         tips.SetToolTip(transport.ZoomIn, "Zoom in (+ or Ctrl+wheel)");
         tips.SetToolTip(transport.ZoomOut, "Zoom out (− or Ctrl+wheel)");
         tips.SetToolTip(transport.Fit, "Show the whole video (0)");
-        tips.SetToolTip(splitButton, "Split the segment under the playhead in two (S)");
-        tips.SetToolTip(newButton, "Start a new segment at the playhead (N)");
-        tips.SetToolTip(resetButton, "Throw away the segments and keep the whole video");
+        tips.SetToolTip(transport.Split, "Split the segment under the playhead in two (S)");
+        tips.SetToolTip(transport.NewSegment, "Start a new segment at the playhead (N)");
+        tips.SetToolTip(side.Reset, "Throw away the segments and keep the whole video");
         tips.SetToolTip(editor.SetIn, "Set the in point to the current frame (I)");
         tips.SetToolTip(editor.SetOut, "Include the current frame and end here (O)");
         tips.SetToolTip(editor.InEarlier, "One frame earlier");
         tips.SetToolTip(editor.InLater, "One frame later");
         tips.SetToolTip(editor.OutEarlier, "One frame earlier");
         tips.SetToolTip(editor.OutLater, "One frame later");
-        tips.SetToolTip(timeline, "Drag the handles to trim. Drag the highlighted span to slide it. Click a dashed segment to edit it. Ctrl+wheel zooms; drag the bar on top to pan.");
-        tips.SetToolTip(exportBar.Fast, ExportModeCopy.FastExplanation);
-        tips.SetToolTip(exportBar.Exact, ExportModeCopy.ExactBaseExplanation);
-        tips.SetToolTip(exportBar.QualityHigh, ExactExportPresets.Hint(ExactQuality.High));
-        tips.SetToolTip(exportBar.QualityBalanced, ExactExportPresets.Hint(ExactQuality.Balanced));
-        tips.SetToolTip(exportBar.QualitySmall, ExactExportPresets.Hint(ExactQuality.Small));
+        tips.SetToolTip(timeline, "Drag the handles to trim. Drag the highlighted span to slide it. Click another segment to edit it. Ctrl+wheel zooms; drag the bar on top to pan.");
+        tips.SetToolTip(exportBar.Mode, ExportModeCopy.FastTitle + ": " + ExportModeCopy.FastExplanation + "\n" + ExportModeCopy.ExactTitle + ": " + ExportModeCopy.ExactBaseExplanation);
+        tips.SetToolTip(exportBar.Quality, string.Join("\n", new[] { ExactQuality.High, ExactQuality.Balanced, ExactQuality.Small }
+            .Select(quality => ExactExportPresets.Title(quality) + ": " + ExactExportPresets.Hint(quality))));
         tips.SetToolTip(exportBar.CopyAudio, "Keep the original audio instead of re-encoding to AAC.");
         tips.SetToolTip(exportBar.Subtitles, "Draw a subtitle track into the picture, so it shows in every player.");
+        tips.SetToolTip(exportBar.Format, "The container to save as. Fast copy rewraps the streams; Exact frames re-encodes them.");
 
         WireDrop(this);
     }
@@ -196,11 +198,15 @@ public sealed partial class MainForm : Form
         base.OnHandleCreated(e);
         if (sized) return;
         sized = true;
+        WindowChrome.Apply(this);
         MinimumSize = new Size(S(980), S(700));
         Size = new Size(S(1320), S(860));
         CenterToScreen();
         LayoutChrome();
     }
+
+    /// <summary>The window itself shows the backdrop in the gaps between its controls.</summary>
+    protected override void OnPaintBackground(PaintEventArgs e) => Backdrop.Paint(e.Graphics, this);
 
     protected override void OnShown(EventArgs e)
     {
@@ -213,8 +219,12 @@ public sealed partial class MainForm : Form
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
+        // The backdrop is stretched to the window, so every control's patch of it changes with the size.
+        Backdrop.Resize(ClientSize);
         LayoutChrome();
+        Invalidate(true);
         QueueFilmstrip();
+        QueueAnchor();
     }
 
     protected override void OnDpiChanged(DpiChangedEventArgs e)
@@ -232,6 +242,7 @@ public sealed partial class MainForm : Form
         TryCancel(filmCts);
         TryCancel(exportCts);
         TryCancel(waveCts);
+        TryCancel(anchorCts);
         StopUpdateChecks();
         base.OnFormClosing(e);
     }
@@ -252,9 +263,14 @@ public sealed partial class MainForm : Form
             CancelAndDispose(filmCts);
             CancelAndDispose(exportCts);
             CancelAndDispose(waveCts);
+            CancelAndDispose(anchorCts);
             previewTimer.Stop();
             accurateTimer.Stop();
             filmTimer.Stop();
+            ambientTimer.Stop();
+            anchorTimer.Stop();
+            ambientTimer.Dispose();
+            anchorTimer.Dispose();
             preview.Image = null;
             player.Dispose();
             timeline.UseStrip(null, 0, 0);
@@ -281,6 +297,12 @@ public sealed partial class MainForm : Form
         if (keyData == Keys.Escape && exporting)
         {
             CancelExport();
+            return true;
+        }
+
+        if (keyData == Keys.F1)
+        {
+            ShowShortcuts();
             return true;
         }
 
@@ -392,54 +414,30 @@ public sealed partial class MainForm : Form
         try
         {
             var loaded = timeline.HasMedia;
-            var toolbarHeight = toolbar.Visible ? S(56) : 0;
-            var statusHeight = S(32);
-            toolbar.SetBounds(0, 0, ClientSize.Width, toolbarHeight);
-            statusBar.SetBounds(0, ClientSize.Height - statusHeight, ClientSize.Width, statusHeight);
-            statusBar.PerformLayout();
-            var top = toolbarHeight;
-            var bottom = ClientSize.Height - statusHeight;
-            var pad = S(16);
-            var gap = S(12);
+            var top = S(44);
+            topBar.SetBounds(0, 0, ClientSize.Width, top);
+            var bottom = ClientSize.Height;
+            var pad = S(12);
+            var gap = S(10);
             if (!loaded)
             {
                 drop.SetBounds(pad, top + pad, Math.Max(10, ClientSize.Width - pad * 2), Math.Max(10, bottom - top - pad * 2));
                 return;
             }
 
-            // A sidebar of cards on the right, the preview, transport and timeline on the left.
-            var sideWidth = S(372);
+            // One glass sidebar on the right; the preview, the dock and the timeline stacked on the left.
+            var sideWidth = S(352);
             var sideLeft = ClientSize.Width - pad - sideWidth;
-            var mainWidth = Math.Max(S(320), sideLeft - gap - pad);
-            var transportHeight = S(40);
-            var timelineHeight = Math.Clamp((bottom - top) / 4, S(132), S(196));
+            var mainWidth = Math.Max(S(320), sideLeft - pad - pad);
+            var dockHeight = S(52);
+            var timelineHeight = Math.Clamp((bottom - top) / 5, S(138), S(190));
             var timelineTop = bottom - pad - timelineHeight;
-            var transportTop = timelineTop - S(8) - transportHeight;
-            previewHost.SetBounds(pad, top + pad, mainWidth, Math.Max(S(80), transportTop - S(10) - top - pad));
-            transport.SetBounds(pad, transportTop, mainWidth, transportHeight);
+            var dockTop = timelineTop - gap - dockHeight;
+            previewHost.SetBounds(pad, top + pad, mainWidth, Math.Max(S(80), dockTop - gap - top - pad));
+            transport.SetBounds(pad, dockTop, mainWidth, dockHeight);
             timeline.SetBounds(pad, timelineTop, mainWidth, timelineHeight);
-
-            var innerWidth = sideWidth - segmentsCard.Pad * 2;
-            exportBar.Width = innerWidth;
-            var exportHeight = exportCard.ContentTop + exportBar.MeasureHeight(innerWidth) + exportCard.Pad;
-            var selectedHeight = selectedCard.ContentTop + editor.MeasureHeight() + selectedCard.Pad;
-            var y = top + pad;
-            var segmentsHeight = Math.Max(S(170), bottom - pad - y - selectedHeight - exportHeight - gap * 2);
-            segmentsCard.SetBounds(sideLeft, y, sideWidth, segmentsHeight);
-            selectedCard.SetBounds(sideLeft, segmentsCard.Bottom + gap, sideWidth, selectedHeight);
-            exportCard.SetBounds(sideLeft, selectedCard.Bottom + gap, sideWidth, exportHeight);
-
-            var content = segmentsCard.ContentBounds;
-            var buttonHeight = S(34);
-            var buttonWidth = (content.Width - S(8) * 2) / 3;
-            var buttonTop = content.Bottom - buttonHeight;
-            splitButton.SetBounds(content.Left, buttonTop, buttonWidth, buttonHeight);
-            newButton.SetBounds(splitButton.Right + S(8), buttonTop, buttonWidth, buttonHeight);
-            resetButton.SetBounds(newButton.Right + S(8), buttonTop, content.Right - newButton.Right - S(8), buttonHeight);
-            segmentList.SetBounds(content.Left, content.Top, content.Width, Math.Max(S(40), buttonTop - S(10) - content.Top));
-            editor.Bounds = selectedCard.ContentBounds;
-            exportBar.Bounds = exportCard.ContentBounds;
-            exportBar.PerformLayout();
+            side.SetBounds(sideLeft, top + pad, sideWidth, Math.Max(S(200), bottom - pad - top - pad));
+            side.PerformLayout();
         }
         finally
         {
@@ -543,21 +541,24 @@ public sealed partial class MainForm : Form
         fps = media.Fps;
         hasAudio = media.HasAudio;
         aspect = media.Aspect > 0 ? media.Aspect : 16 / 9d;
+        subtitles = media.Subtitles;
+        timeline.Aspect = aspect;
         CancelPreviewJobs();
         ClearPictures();
         timeline.Locked = false;
         timeline.SetClip(media.Duration, media.Fps, media.Frames);
-        toolbar.FileName.Text = Path.GetFileName(path);
-        tips.SetToolTip(toolbar.FileName, path);
-        toolbar.Meta.Text = string.Format(CultureInfo.CurrentCulture, "{0}   ·   {1:0.###} fps   ·   {2:N0} frames{3}{4}",
-            TimeMath.Format(media.Frames, media.Fps), media.Fps, media.Frames, media.HasAudio ? "" : "   ·   no audio",
-            media.Subtitles.Count switch { 0 => "", 1 => "   ·   1 subtitle track", var n => $"   ·   {n} subtitle tracks" });
-        toolbar.Visible = true;
+        topBar.FileName.Text = Path.GetFileName(path);
+        tips.SetToolTip(topBar.FileName, path);
+        topBar.Meta.Text = string.Format(CultureInfo.CurrentCulture, "{0}  ·  {1:0.###} fps  ·  {2:N0} frames{3}{4}",
+            TimeMath.Format(media.Frames, media.Fps), media.Fps, media.Frames, media.HasAudio ? "" : "  ·  no audio",
+            media.Subtitles.Count switch { 0 => "", 1 => "  ·  1 subtitle track", var n => $"  ·  {n} subtitle tracks" });
+        tips.SetToolTip(topBar.Meta, topBar.Meta.Text);
+        topBar.PerformLayout();
         drop.Visible = false;
-        foreach (Control control in new Control[] { previewHost, transport, timeline, segmentsCard, selectedCard, exportCard })
+        foreach (Control control in new Control[] { previewHost, transport, timeline, side })
             control.Visible = true;
         exportBar.Export.Enabled = true;
-        exportBar.SetSubtitleTracks(media.Subtitles);
+        exportBar.SetSource(Path.GetExtension(path), media.Subtitles);
         LayoutChrome();
         WriteBoxes();
         UpdateReadouts();
@@ -573,6 +574,7 @@ public sealed partial class MainForm : Form
         if (!syncing && !timeline.IsDragging) WriteBoxes();
         UpdateReadouts();
         SchedulePreview(false);
+        QueueAnchor();
     }
 
     void OnTimelineInteractionEnded()
@@ -586,13 +588,15 @@ public sealed partial class MainForm : Form
         var zoom = timeline.Zoom;
         transport.ZoomLabel.Text = zoom < 1.05 ? "1×" : zoom < 10 ? $"{zoom:0.#}×" : $"{zoom:0}×";
         QueueFilmstrip();
+        QueueAnchor();
     }
 
     void UpdateReadouts()
     {
         if (!timeline.HasMedia)
         {
-            editor.Selected.Text = "";
+            side.EditorTitle = "";
+            side.EditorDetail = "";
             transport.Readout.Text = "";
             return;
         }
@@ -602,20 +606,21 @@ public sealed partial class MainForm : Form
         var picks = timeline.PickedSegments;
         segmentList.SetSegments(all, timeline.ActiveIndex, timeline.Fps, timeline.PickedIndices);
         exportBar.SetSegmentCount(picks.Count > 0 ? picks.Count : kept.Count);
-        var exportText = picks.Count > 0 ? $"Export {picks.Count} selected…" : "Export…";
-        if (exportBar.Export.Text != exportText)
+        // While an export runs the button is its progress bar, and says so itself.
+        if (!exporting)
         {
-            exportBar.Export.Text = exportText;
-            exportBar.Export.Invalidate();
+            var exportText = picks.Count > 0 ? $"Export {picks.Count} selected…" : all.Count > 1 ? $"Export {all.Count} segments…" : "Export…";
+            if (exportBar.Export.Text != exportText) exportBar.Export.Text = exportText;
         }
 
         var keptFrames = CutList.KeptFrames(kept);
-        segmentsCard.Detail = picks.Count > 0
+        side.SegmentsDetail = picks.Count > 0
             ? $"{picks.Count} of {all.Count} selected  ·  {TimeMath.Format(picks.Sum(p => p.Length), timeline.Fps)}"
-            : $"{all.Count}  ·  {TimeMath.Format(keptFrames, timeline.Fps)} kept";
+            : $"{all.Count} kept  ·  {TimeMath.Format(keptFrames, timeline.Fps)}";
         var frames = timeline.OutFrame - timeline.InFrame;
         var unit = frames == 1 ? "frame" : "frames";
-        editor.Selected.Text = $"Segment {timeline.ActiveIndex + 1}  ·  {TimeMath.Format(frames, timeline.Fps)}  ·  {frames:N0} {unit}";
+        side.EditorTitle = $"Segment {timeline.ActiveIndex + 1}";
+        side.EditorDetail = $"{TimeMath.Format(frames, timeline.Fps)}  ·  {frames:N0} {unit}";
         UpdateReadout(timeline.PlayheadFrame);
     }
 
@@ -841,6 +846,26 @@ public sealed partial class MainForm : Form
         if (IsDisposed || player.IsPlaying) return;
         preview.Image = bitmap;
         stills.Cache.SetShown(bitmap);
+        ambientTimer.Stop();
+        ambientTimer.Start();
+    }
+
+    /// <summary>
+    /// Tints the window from the still on screen. It waits for the still to settle and skips playback and drags,
+    /// because a new backdrop repaints every control.
+    /// </summary>
+    void OnAmbientTick()
+    {
+        ambientTimer.Stop();
+        if (IsDisposed || preview.Image is null) return;
+        if (player.IsPlaying || timeline.IsDragging)
+        {
+            ambientTimer.Start();
+            return;
+        }
+
+        Backdrop.SetFrame(preview.Image, ClientSize);
+        Invalidate(true);
     }
 
     int PreviewWidth()
@@ -863,9 +888,13 @@ public sealed partial class MainForm : Form
     /// <summary>Enough thumbnails to fill the timeline's width, for the frames it shows now.</summary>
     StripKey DesiredStrip()
     {
-        var slot = Math.Max(S(104), 48);
-        var count = Math.Clamp(timeline.FilmWidth / slot, 6, 32);
-        return new StripKey(count, timeline.VisibleStart, Math.Max(timeline.VisibleStart + 1, timeline.VisibleEnd));
+        // One thumbnail per uncropped tile: a slot no wider than the picture never crops it top and bottom.
+        // The strip is a whole number of tiles, so it usually runs a little past the right edge, where the last tile is clipped.
+        var tiles = timeline.FilmWidth / timeline.TileWidth;
+        var count = Math.Clamp((int)Math.Ceiling(tiles), 1, 48);
+        var start = timeline.VisibleStart;
+        var visible = Math.Max(1, timeline.VisibleEnd - start);
+        return new StripKey(count, start, start + Math.Max(1, (long)Math.Round(visible * (count / tiles))));
     }
 
     void StartFilmstrip(StripKey key)
@@ -888,11 +917,90 @@ public sealed partial class MainForm : Form
             isExporting: () => exporting);
     }
 
+    /// <summary>Asks for the selected segment's own thumbnails once the edit or the view has settled.</summary>
+    void QueueAnchor()
+    {
+        if (!timeline.HasMedia || IsDisposed) return;
+        anchorTimer.Stop();
+        anchorTimer.Start();
+    }
+
+    void OnAnchorTick()
+    {
+        anchorTimer.Stop();
+        if (!timeline.HasMedia || IsDisposed || input is null || runner.Ffmpeg is null || exporting) return;
+        if (timeline.IsDragging)
+        {
+            anchorTimer.Start();
+            return;
+        }
+
+        var want = timeline.AnchorRequest;
+        if (want == anchorKey) return;
+        anchorKey = want;
+        ReplaceCts(ref anchorCts);
+        if (want is { } request) _ = BuildAnchorAsync(input, request, timeline.ThumbHeight, anchorCts.Token);
+        else ShowAnchor(null, 0, 0);
+    }
+
+    /// <summary>
+    /// The first tile is the segment's in frame and the last is its out frame, so the strip shows where the cut lands.
+    /// They use the same quick seek as the regular strip: seeking after the input would decode the file from its start.
+    /// </summary>
+    async Task BuildAnchorAsync(string path, (long In, long Out, int Count) request, int height, CancellationToken token)
+    {
+        var slots = new Bitmap?[request.Count];
+        var last = request.Count - 1;
+        using var gate = new SemaphoreSlim(3);
+        try
+        {
+            await Task.WhenAll(Enumerable.Range(0, request.Count).Select(async i =>
+            {
+                await gate.WaitAsync(token);
+                try
+                {
+                    var frame = request.In + (long)Math.Round((request.Out - 1 - request.In) * (i / (double)last));
+                    var time = timeline.SeekTime(frame);
+                    // The probed length can run a little past the last real frame; step back rather than leave a hole.
+                    slots[i] = await stills.CaptureAsync(path, duration, time, accurate: false, "scale=-2:" + height, 5, token)
+                        ?? await stills.CaptureAsync(path, duration, Math.Max(0, time - 0.5), accurate: false, "scale=-2:" + height, 5, token);
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            }));
+        }
+        catch (OperationCanceledException)
+        {
+            // The segment or the view changed again.
+        }
+
+        if (token.IsCancellationRequested || IsDisposed || anchorKey != request)
+        {
+            foreach (var bitmap in slots) bitmap?.Dispose();
+            return;
+        }
+
+        ShowAnchor(slots, request.In, request.Out);
+    }
+
+    void ShowAnchor(Bitmap?[]? slots, long start, long end)
+    {
+        var old = anchorStrip;
+        anchorStrip = slots;
+        timeline.UseAnchor(slots, start, end);
+        if (old is null) return;
+        foreach (var bitmap in old) bitmap?.Dispose();
+    }
+
     void CancelPreviewJobs()
     {
         StopPlayback();
         ReplaceCts(ref previewCts);
         ReplaceCts(ref filmCts);
+        ReplaceCts(ref anchorCts);
+        anchorTimer.Stop();
         previewGeneration++;
         filmstrip.InvalidateJobs();
         previewTimer.Stop();
@@ -907,6 +1015,8 @@ public sealed partial class MainForm : Form
         stills.Cache.SetShown(null);
         stills.Clear();
         filmstrip.Clear(timeline);
+        anchorKey = null;
+        ShowAnchor(null, 0, 0);
     }
 
     async void Export()
@@ -934,11 +1044,13 @@ public sealed partial class MainForm : Form
 
         var segments = separate ? pieces : CutList.Normalize(pieces, timeline.TotalFrames);
 
-        var extension = Path.GetExtension(input);
+        // The format is chosen in the Export panel; the dialog only names the file.
+        var format = exportBar.OutputFormat;
+        var extension = OutputFormats.Extension(format, Path.GetExtension(input));
         using var dialog = new SaveFileDialog
         {
             FileName = Path.GetFileNameWithoutExtension(input) + (separate ? "_part" : "_trimmed") + extension,
-            Filter = "Same container|*",
+            Filter = format == OutputFormat.Source ? "Same container|*" : $"{OutputFormats.Name(format)} video|*{extension}",
             InitialDirectory = Path.GetDirectoryName(input) ?? "",
             Title = separate ? $"Name the files — the {segments.Count} segments are saved as name_01, name_02, …" : "Save the trimmed video",
             // Separate files get numbered names, so the chosen name itself is never written.
@@ -946,6 +1058,10 @@ public sealed partial class MainForm : Form
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         var output = dialog.FileName;
+        // A different extension typed in the dialog would quietly change the format, so the chosen one is kept.
+        if (format != OutputFormat.Source && !Path.GetExtension(output).Equals(extension, StringComparison.OrdinalIgnoreCase))
+            output += extension;
+        var remux = Remux.For(input, output, subtitles);
         var outputs = separate ? ExportService.SeparateOutputs(output, segments.Count) : [output];
         if (outputs.Any(path => string.Equals(Path.GetFullPath(path), Path.GetFullPath(input), StringComparison.OrdinalIgnoreCase)))
         {
@@ -967,14 +1083,9 @@ public sealed partial class MainForm : Form
         PauseWaveform();
         timeline.Locked = true;
         exportBar.Export.Enabled = false;
-        exportBar.Cancel.Enabled = true;
-        exportBar.Cancel.Visible = true;
-        exportBar.Fast.Enabled = false;
-        exportBar.Exact.Enabled = false;
-        exportBar.SetExactOptionsEnabled(false);
-        statusBar.Progress.Fraction = 0;
-        statusBar.Progress.Visible = true;
-        statusBar.PerformLayout();
+        exportBar.SetBusy(true);
+        exportBar.Export.Text = "Exporting…";
+        exportBar.Export.Progress = 0;
         LayoutChrome();
         SetStatus(mode + "…", StatusKind.Busy);
         var exactOptions = exportBar.ExactOptions;
@@ -983,8 +1094,8 @@ public sealed partial class MainForm : Form
         try
         {
             plan = separate
-                ? ExportService.PlanSeparate(input, output, segments, timeline.Fps, exact, exactOptions)
-                : ExportService.Plan(input, output, segments, timeline.Fps, hasAudio, exact, exactOptions);
+                ? ExportService.PlanSeparate(input, output, segments, timeline.Fps, exact, exactOptions, remux)
+                : ExportService.Plan(input, output, segments, timeline.Fps, hasAudio, exact, exactOptions, remux);
             if (plan.WorkDirectory is not null)
             {
                 var work = Directory.CreateDirectory(plan.WorkDirectory);
@@ -1006,8 +1117,10 @@ public sealed partial class MainForm : Form
                     if (!exporting || IsDisposed) return;
                     var within = Math.Clamp(elapsed.TotalSeconds / Math.Max(0.001, step.Seconds), 0, 1);
                     var fraction = Math.Clamp((before + within * step.Weight) / totalWeight, 0, 1);
-                    statusBar.Progress.Fraction = fraction;
-                    SetStatus($"{phase}… {(int)Math.Round(fraction * 100)}%", StatusKind.Busy);
+                    var percent = (int)Math.Round(fraction * 100);
+                    exportBar.Export.Progress = fraction;
+                    exportBar.Export.Text = $"Exporting… {percent}%";
+                    SetStatus($"{phase}… {percent}%", StatusKind.Busy);
                 });
                 SetStatus(phase + "…", StatusKind.Busy);
                 await runner.RunAsync(runner.Ffmpeg, step.Arguments, token, progress);
@@ -1026,7 +1139,14 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            if (!IsDisposed) SetStatus("Export failed: " + ex.Message, StatusKind.Error);
+            if (!IsDisposed)
+            {
+                SetStatus("Export failed: " + ex.Message, StatusKind.Error);
+                // A change of container fails when a stream cannot go into the new one; say what to do about it.
+                var hint = remux is null ? "" : ExportModeCopy.ConvertFailedHint(OutputFormats.Name(format), exact, exactOptions.CopyAudio);
+                if (hint.Length > 0)
+                    MessageBox.Show(this, hint, "VideoTrimmer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
         finally
         {
@@ -1035,14 +1155,9 @@ public sealed partial class MainForm : Form
             timeline.Locked = false;
             if (!IsDisposed)
             {
+                exportBar.SetBusy(false);
                 exportBar.Export.Enabled = timeline.HasMedia;
-                exportBar.Cancel.Enabled = false;
-                exportBar.Cancel.Visible = false;
-                exportBar.Fast.Enabled = true;
-                exportBar.Exact.Enabled = true;
-                exportBar.SetExactOptionsEnabled(true);
-                statusBar.Progress.Visible = false;
-                statusBar.PerformLayout();
+                UpdateReadouts();
                 LayoutChrome();
                 ResumeWaveform();
             }
@@ -1236,18 +1351,16 @@ public sealed partial class MainForm : Form
 
     void SetStatus(string text, StatusKind kind)
     {
-        statusBar.Label.Text = text;
-        statusBar.Label.AccessibleName = text;
-        statusBar.Label.ForeColor = kind switch
-        {
-            StatusKind.Error => Theme.OutPoint,
-            StatusKind.Good => Theme.InPoint,
-            StatusKind.Busy => Theme.Text,
-            _ => Theme.Muted,
-        };
+        topBar.SetStatus(text, kind);
+        // The bar shortens a long message; the tooltip has all of it.
+        tips.SetToolTip(topBar.Status, text);
+    }
+
+    void ShowShortcuts()
+    {
+        using var dialog = new ShortcutsDialog();
+        dialog.ShowDialog(this);
     }
 
     int S(int logical) => LogicalToDeviceUnits(logical);
-
-    enum StatusKind { Info, Busy, Good, Error }
 }

@@ -12,28 +12,33 @@ sealed class TimelineControl : Control
     enum DragKind { None, Playhead, InHandle, OutHandle, Span, Overview }
     enum HitKind { None, InHandle, OutHandle, Selection, Film, Overview }
 
-    static readonly SolidBrush SurfaceBrush = new(Theme.Surface);
-    static readonly SolidBrush LaneBrush = new(Theme.Darken(Theme.Surface, 8));
-    static readonly SolidBrush DimBrush = new(Color.FromArgb(170, 16, 18, 22));
-    static readonly HatchBrush CutHatch = new(HatchStyle.WideDownwardDiagonal, Color.FromArgb(46, Theme.OutPoint), Color.Transparent);
-    static readonly SolidBrush TagBackgroundBrush = new(Color.FromArgb(210, 16, 18, 22));
-    static readonly SolidBrush PlayheadBrush = new(Theme.Text);
-    static readonly SolidBrush GripBrush = new(Color.FromArgb(180, 16, 18, 22));
-    static readonly SolidBrush WaveBrush = new(Theme.Wave);
-    static readonly SolidBrush OverviewBrush = new(Theme.Darken(Theme.Surface, 10));
-    static readonly SolidBrush OverviewKeptBrush = new(Color.FromArgb(150, Theme.Accent));
-    static readonly SolidBrush ViewportBrush = new(Color.FromArgb(40, Theme.Text));
-    static readonly Pen ViewportPen = new(Theme.Text, 1);
-    static readonly Pen BorderPen = new(Theme.Border);
-    static readonly Pen LaneLinePen = new(Theme.Border);
+    static readonly SolidBrush FilmBrush = new(Theme.Well);
+    static readonly SolidBrush LaneBrush = new(Theme.Darken(Theme.Well, 4));
+    // Cut regions are dimmed and hatched in neutral tones: red is kept for caution, not for "removed".
+    static readonly SolidBrush DimBrush = new(Color.FromArgb(196, 8, 9, 12));
+    static readonly HatchBrush CutHatch = new(HatchStyle.WideDownwardDiagonal, Color.FromArgb(26, 255, 255, 255), Color.Transparent);
+    static readonly SolidBrush TagBackgroundBrush = new(Color.FromArgb(214, 13, 15, 19));
+    static readonly SolidBrush PlayheadBrush = new(Color.White);
+    static readonly SolidBrush AccentBrush = new(Theme.Accent);
+    static readonly SolidBrush GripBrush = new(Theme.OnAccent);
+    static readonly SolidBrush WaveBrush = new(Theme.Muted);
+    static readonly SolidBrush OverviewBrush = new(Color.FromArgb(90, 0, 0, 0));
+    static readonly SolidBrush ViewportBrush = new(Color.FromArgb(46, 255, 255, 255));
+    static readonly SolidBrush ViewportGripBrush = new(Color.FromArgb(216, 255, 255, 255));
+    static readonly Pen ViewportPen = new(Color.FromArgb(204, 255, 255, 255), 1);
+    static readonly Pen LaneLinePen = new(Theme.WellBorder);
     static readonly Pen SelectionPen = new(Theme.Accent, 2);
-    static readonly Pen KeptPen = new(Color.FromArgb(170, Theme.Accent), 2) { DashStyle = DashStyle.Dash };
+    static readonly Pen KeptPen = new(Color.FromArgb(96, 255, 255, 255), 1);
     static readonly Pen PickedPen = new(Theme.Accent, 2);
-    static readonly Pen PlayheadPen = new(Theme.Text, 2);
+    static readonly Pen PlayheadPen = new(Color.White, 2);
 
     Bitmap?[]? strip;
     long stripStart;
     long stripEnd;
+    // Thumbnails laid from the selected segment's in point to its out point: the first is the in frame, the last the out frame.
+    Bitmap?[]? anchor;
+    long anchorIn;
+    long anchorOut;
     double duration;
     double fps;
     long totalFrames;
@@ -62,7 +67,7 @@ sealed class TimelineControl : Control
     public TimelineControl()
     {
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
-        BackColor = Theme.Background;
+        BackColor = Theme.Base;
         TabStop = true;
         AccessibleName = "Timeline";
         AccessibleRole = AccessibleRole.Pane;
@@ -168,6 +173,42 @@ sealed class TimelineControl : Control
 
     public int FilmWidth => Math.Max(1, FilmRect().Width);
 
+    /// <summary>The video's displayed width over height. Thumbnails are drawn at this shape, never cropped top and bottom.</summary>
+    public double Aspect { get; set; } = 16 / 9d;
+
+    /// <summary>How wide one uncropped thumbnail is at the filmstrip's height.</summary>
+    public double TileWidth => Math.Max(8, FilmRect().Height * (Aspect > 0 ? Aspect : 16 / 9d));
+
+    /// <summary>
+    /// The thumbnails the selected segment wants laid from its in point to its out point, or null when it should just
+    /// show the regular strip: it is the whole clip, it runs off the visible window, or it is barely wider than one tile.
+    /// </summary>
+    public (long In, long Out, int Count)? AnchorRequest
+    {
+        get
+        {
+            if (!HasMedia || (inFrame <= 0 && outFrame >= totalFrames)) return null;
+            if (inFrame < viewStart - 0.5 || outFrame > viewStart + viewSpan + 0.5) return null;
+            var count = AnchorCount();
+            return count < 2 ? null : (inFrame, outFrame, count);
+        }
+    }
+
+    int AnchorCount()
+    {
+        var span = XOf(outFrame) - XOf(inFrame);
+        return span < TileWidth * 1.15 ? 0 : Math.Clamp((int)Math.Ceiling(span / TileWidth), 2, 64);
+    }
+
+    /// <summary>Shows thumbnails for the segment from <paramref name="start"/> to <paramref name="end"/>, first to last.</summary>
+    public void UseAnchor(Bitmap?[]? images, long start, long end)
+    {
+        anchor = images;
+        anchorIn = start;
+        anchorOut = end;
+        Invalidate();
+    }
+
     public int ThumbHeight
     {
         get
@@ -201,6 +242,7 @@ sealed class TimelineControl : Control
         others.Clear();
         picked.Clear();
         strip = null;
+        anchor = null;
         drag = DragKind.None;
         viewStart = 0;
         viewSpan = totalFrames;
@@ -486,30 +528,32 @@ sealed class TimelineControl : Control
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.Clear(Theme.Background);
+        Backdrop.Paint(g, this);
         g.SmoothingMode = SmoothingMode.AntiAlias;
+        PaintUtil.Panel(g, ClientRectangle, LogicalToDeviceUnits(14));
         // Bilinear is enough for filmstrip thumbs and much cheaper than HighQualityBicubic.
         g.InterpolationMode = InterpolationMode.Bilinear;
         g.PixelOffsetMode = PixelOffsetMode.Half;
         var film = FilmRect();
         var lane = LaneRect();
         var track = TrackRect();
-        g.FillRectangle(SurfaceBrush, film);
+        g.FillRectangle(FilmBrush, film);
 
         if (!HasMedia)
         {
             if (!string.IsNullOrWhiteSpace(Placeholder))
                 TextRenderer.DrawText(g, Placeholder, Theme.Ui(9.5f), film, Theme.Muted,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
-            DrawBorder(g, film);
             return;
         }
 
         if (IsZoomed) DrawOverview(g, OverviewRect());
+        DrawRuler(g, track);
 
         var state = g.Save();
         g.SetClip(track);
         DrawStrip(g, film);
+        DrawAnchor(g, film);
         DrawLane(g, lane);
 
         // Everything outside the kept segments is cut: dim it and hatch it.
@@ -537,18 +581,19 @@ sealed class TimelineControl : Control
         var inX = XOf(inFrame);
         var outX = XOf(outFrame);
         if (outX > inX)
-            g.DrawRectangle(SelectionPen, inX, track.Top + 1, outX - inX, track.Height - 3);
+            g.DrawRectangle(SelectionPen, inX, track.Top + 1, outX - inX, track.Height - 2);
         if (numbered) DrawBadge(g, (active + 1).ToString(), inX, outX, film, selected: true);
-
-        DrawHandle(g, inX, track, Theme.InPoint);
-        DrawHandle(g, outX, track, Theme.OutPoint);
-        DrawPlayhead(g, XOf(Math.Clamp(playhead, 0, totalFrames)), track);
         DrawRangeTags(g, film, inX, outX);
         DrawLaneNote(g, lane);
+
+        // The handles sit just outside the selection, so the frame and its two ends read as one object.
+        g.SetClip(Rectangle.Inflate(track, HandleWidth, 0));
+        DrawHandle(g, inX, track, isIn: true);
+        DrawHandle(g, outX, track, isIn: false);
+        DrawPlayhead(g, XOf(Math.Clamp(playhead, 0, totalFrames)), track);
         g.Restore(state);
-        DrawBorder(g, track);
         if (Focused && ShowFocusCues)
-            ControlPaint.DrawFocusRectangle(g, Rectangle.Inflate(track, 3, 3));
+            PaintUtil.FocusRing(g, ClientRectangle, LogicalToDeviceUnits(14));
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -561,10 +606,10 @@ sealed class TimelineControl : Control
         dragStart = e.Location;
         if (hit == HitKind.Overview)
         {
-            // Center the window on the click, then drag to pan.
-            var overview = OverviewRect();
-            var frame = (e.X - overview.Left) / (double)Math.Max(1, overview.Width) * totalFrames;
-            ScrollTo(frame - viewSpan / 2);
+            // A click beside the thumb centers it there; either way, dragging then pans.
+            var (thumb, travel) = OverviewThumb(OverviewRect());
+            if (!thumb.Contains(e.Location) && travel > 0)
+                ScrollTo((e.X - OverviewRect().Left - thumb.Width / 2) / travel * (totalFrames - viewSpan));
             panAnchorStart = viewStart;
             drag = DragKind.Overview;
             Capture = true;
@@ -618,8 +663,9 @@ sealed class TimelineControl : Control
 
         if (drag == DragKind.Overview)
         {
-            var overview = OverviewRect();
-            ScrollTo(panAnchorStart + (e.X - dragStart.X) / (double)Math.Max(1, overview.Width) * totalFrames);
+            // The thumb has a minimum width, so its travel (not the bar's width) maps onto the scrollable range.
+            var travel = OverviewThumb(OverviewRect()).Travel;
+            if (travel > 0) ScrollTo(panAnchorStart + (e.X - dragStart.X) / travel * (totalFrames - viewSpan));
             return;
         }
 
@@ -782,12 +828,14 @@ sealed class TimelineControl : Control
     /// <summary>The thumbnails, plus the waveform lane beneath them once a clip is loaded.</summary>
     Rectangle TrackRect()
     {
-        var pad = LogicalToDeviceUnits(2);
-        var rect = ClientRectangle;
-        rect.Inflate(-pad, -pad);
+        // Inside the glass panel, with room at the sides for the handles and below for the time ruler.
+        var pad = LogicalToDeviceUnits(10);
+        var side = pad + HandleWidth;
+        var rect = new Rectangle(side, pad, ClientSize.Width - side * 2, ClientSize.Height - pad * 2);
+        if (HasMedia) rect.Height -= RulerHeight();
         if (IsZoomed && HasMedia)
         {
-            var overview = OverviewHeight() + LogicalToDeviceUnits(4);
+            var overview = OverviewHeight() + LogicalToDeviceUnits(8);
             rect.Y += overview;
             rect.Height -= overview;
         }
@@ -797,12 +845,31 @@ sealed class TimelineControl : Control
         return rect;
     }
 
-    int OverviewHeight() => LogicalToDeviceUnits(14);
+    int HandleWidth => Math.Max(10, LogicalToDeviceUnits(12));
+
+    int RulerHeight() => LogicalToDeviceUnits(18);
+
+    int OverviewHeight() => LogicalToDeviceUnits(12);
 
     Rectangle OverviewRect()
     {
-        var pad = LogicalToDeviceUnits(2);
-        return new Rectangle(pad, pad, Math.Max(1, ClientSize.Width - pad * 2), OverviewHeight());
+        var pad = LogicalToDeviceUnits(10);
+        var side = pad + HandleWidth;
+        return new Rectangle(side, pad + LogicalToDeviceUnits(2), Math.Max(1, ClientSize.Width - side * 2), OverviewHeight());
+    }
+
+    /// <summary>
+    /// The draggable thumb on the overview bar. It never gets narrower than 28 pixels, however far the view is zoomed
+    /// into a long video, so <c>Travel</c> (the distance it can move) is what maps onto the scrollable range.
+    /// </summary>
+    (RectangleF Thumb, float Travel) OverviewThumb(Rectangle overview)
+    {
+        var width = Math.Min(overview.Width, Math.Max(LogicalToDeviceUnits(28), (float)(viewSpan / totalFrames * overview.Width)));
+        var travel = overview.Width - width;
+        var range = totalFrames - viewSpan;
+        var x = overview.Left + (range <= 0 ? 0 : (float)(viewStart / range * travel));
+        var grow = LogicalToDeviceUnits(2);
+        return (new RectangleF(x, overview.Top - grow, width, overview.Height + grow * 2), travel);
     }
 
     int LaneHeight()
@@ -848,7 +915,8 @@ sealed class TimelineControl : Control
 
     HitKind HitTest(Point point)
     {
-        if (IsZoomed && OverviewRect().Contains(point)) return HitKind.Overview;
+        // A few extra pixels above and below make the thin bar easy to hit.
+        if (IsZoomed && Rectangle.Inflate(OverviewRect(), 0, LogicalToDeviceUnits(5)).Contains(point)) return HitKind.Overview;
         var x = point.X;
         var film = FilmRect();
         if (x < film.Left || x > film.Right) return HitKind.None;
@@ -896,21 +964,83 @@ sealed class TimelineControl : Control
         }
     }
 
+    /// <summary>
+    /// The selected segment's own thumbnails, over the regular strip. Skipped mid-drag and whenever they no longer
+    /// match the segment or the zoom, so a stale set is never stretched; the regular strip shows through instead.
+    /// </summary>
+    void DrawAnchor(Graphics graphics, Rectangle film)
+    {
+        if (anchor is not { Length: > 1 } || anchorIn != inFrame || anchorOut != outFrame) return;
+        if (drag is DragKind.InHandle or DragKind.OutHandle or DragKind.Span || anchor.Length != AnchorCount()) return;
+        var left = XOf(inFrame);
+        var right = XOf(outFrame);
+        // Whole tiles run from the in point; the last one is pinned to the out point instead, over the end of the one
+        // before it. So the in frame and the out frame are both shown uncropped, right against their handles.
+        var tile = (float)TileWidth;
+        var state = graphics.Save();
+        graphics.SetClip(new Rectangle(left, film.Top, right - left, film.Height), CombineMode.Intersect);
+        for (var i = 0; i < anchor.Length; i++)
+        {
+            var image = anchor[i];
+            if (image is null) continue;
+            var x = i == anchor.Length - 1 ? right - tile : left + tile * i;
+            var slot = new RectangleF(x, film.Top, tile + 1, film.Height);
+            if (slot.Right < film.Left || slot.Left > film.Right) continue;
+            DrawCover(graphics, image, slot);
+        }
+
+        graphics.Restore(state);
+    }
+
+    /// <summary>Timecodes under the filmstrip for the frames at evenly spaced points of the view.</summary>
+    void DrawRuler(Graphics graphics, Rectangle track)
+    {
+        var font = Theme.Mono(8);
+        var count = Math.Clamp(track.Width / LogicalToDeviceUnits(170), 2, 8);
+        var top = track.Bottom + LogicalToDeviceUnits(4);
+        var height = RulerHeight() - LogicalToDeviceUnits(4);
+        for (var i = 0; i < count; i++)
+        {
+            var share = i / (double)(count - 1);
+            var text = TimeMath.Format((long)Math.Round(viewStart + viewSpan * share), fps);
+            var width = TextRenderer.MeasureText(text, font, Size.Empty, TextFormatFlags.NoPadding).Width;
+            var x = track.Left + (int)((track.Width - width) * share);
+            TextRenderer.DrawText(graphics, text, font, new Rectangle(x, top, width + 2, height), Theme.Muted,
+                TextFormatFlags.NoPadding | TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+        }
+    }
+
     void DrawOverview(Graphics graphics, Rectangle overview)
     {
-        graphics.FillRectangle(OverviewBrush, overview);
+        var radius = overview.Height / 2f;
+        using (var path = PaintUtil.Rounded((RectangleF)overview, radius))
+            graphics.FillPath(OverviewBrush, path);
         double Scale(double frame) => overview.Left + frame / totalFrames * overview.Width;
+        var bar = LogicalToDeviceUnits(4);
         foreach (var segment in ExportSegments)
         {
             var left = (float)Scale(segment.In);
-            graphics.FillRectangle(OverviewKeptBrush, left, overview.Top + 3, Math.Max(1, (float)Scale(segment.Out) - left), overview.Height - 6);
+            var kept = new RectangleF(left, overview.Top + (overview.Height - bar) / 2f, Math.Max(2, (float)Scale(segment.Out) - left), bar);
+            using var path = PaintUtil.Rounded(kept, bar / 2f);
+            graphics.FillPath(AccentBrush, path);
         }
 
         var x = (float)Scale(playhead);
         graphics.FillRectangle(PlayheadBrush, x - 1, overview.Top, 2, overview.Height);
-        var viewport = new RectangleF((float)Scale(viewStart), overview.Top, Math.Max(4, (float)(viewSpan / totalFrames * overview.Width)), overview.Height - 1);
-        graphics.FillRectangle(ViewportBrush, viewport);
-        graphics.DrawRectangle(ViewportPen, viewport.X, viewport.Y, viewport.Width, viewport.Height);
+
+        var thumb = OverviewThumb(overview).Thumb;
+        using (var path = PaintUtil.Rounded(new RectangleF(thumb.X + 0.5f, thumb.Y + 0.5f, thumb.Width - 1, thumb.Height - 1), LogicalToDeviceUnits(6)))
+        {
+            graphics.FillPath(ViewportBrush, path);
+            graphics.DrawPath(ViewportPen, path);
+        }
+
+        // Three grip lines say "drag me"; skipped when the thumb is so wide they would float in the middle of nothing.
+        var gripHeight = LogicalToDeviceUnits(6);
+        var gap = LogicalToDeviceUnits(4);
+        var middle = thumb.X + thumb.Width / 2f;
+        for (var i = -1; i <= 1; i++)
+            graphics.FillRectangle(ViewportGripBrush, middle + i * gap - 1, thumb.Y + (thumb.Height - gripHeight) / 2f, 2, gripHeight);
     }
 
     void DrawLane(Graphics graphics, Rectangle lane)
@@ -975,24 +1105,29 @@ sealed class TimelineControl : Control
         left = Math.Max(left, film.Left);
         right = Math.Min(right, film.Right);
         if (right - left < width + LogicalToDeviceUnits(8)) return;
-        var rect = new Rectangle(left + LogicalToDeviceUnits(6), film.Bottom - height - LogicalToDeviceUnits(6), width, height);
+        // Clear of a neighbouring selection's handle, which sits just outside that selection.
+        var inset = selected ? LogicalToDeviceUnits(6) : HandleWidth + LogicalToDeviceUnits(4);
+        var rect = new Rectangle(left + inset, film.Bottom - height - LogicalToDeviceUnits(6), width, height);
         using var path = PaintUtil.Rounded(rect, height / 2);
-        using var brush = new SolidBrush(selected ? Theme.Accent : Color.FromArgb(220, Theme.Surface));
+        using var brush = new SolidBrush(selected ? Theme.Accent : Color.FromArgb(214, 13, 15, 19));
         graphics.FillPath(brush, path);
-        TextRenderer.DrawText(graphics, text, font, rect, selected ? Color.White : Theme.Text,
+        TextRenderer.DrawText(graphics, text, font, rect, selected ? Theme.OnAccent : Theme.Text,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
 
-    void DrawHandle(Graphics graphics, int x, Rectangle track, Color color)
+    /// <summary>
+    /// Both ends of the selection share the accent: in is always the left end and out the right, so position and the
+    /// rounded outer edge tell them apart without leaning on red and green.
+    /// </summary>
+    void DrawHandle(Graphics graphics, int x, Rectangle track, bool isIn)
     {
-        var width = Math.Max(8, LogicalToDeviceUnits(10));
-        var rect = new Rectangle(x - width / 2, track.Top, width, track.Height);
-        using var brush = new SolidBrush(color);
-        graphics.FillRectangle(brush, rect);
-        var middle = track.Top + track.Height / 2;
-        var gap = LogicalToDeviceUnits(5);
-        for (var i = -1; i <= 1; i++)
-            graphics.FillEllipse(GripBrush, x - 2, middle + i * gap - 2, 4, 4);
+        var width = HandleWidth;
+        var rect = new RectangleF(isIn ? x - width : x, track.Top, width, track.Height);
+        using (var path = PaintUtil.RoundedSide(rect, LogicalToDeviceUnits(6), left: isIn))
+            graphics.FillPath(AccentBrush, path);
+        var grip = Math.Min(LogicalToDeviceUnits(22), track.Height - LogicalToDeviceUnits(12));
+        if (grip > 4)
+            graphics.FillRectangle(GripBrush, rect.X + width / 2f - 1, track.Top + (track.Height - grip) / 2f, 2, grip);
     }
 
     static void DrawPlayhead(Graphics graphics, int x, Rectangle track)
@@ -1025,8 +1160,8 @@ sealed class TimelineControl : Control
         outLeft = ClampTag(outLeft, outSize.Width, film);
         if (!TagsOverlap(inLeft, inSize.Width, outLeft, outSize.Width, gap))
         {
-            DrawTagAt(graphics, inText, inLeft, top, inSize, Theme.InPoint);
-            DrawTagAt(graphics, outText, outLeft, top, outSize, Theme.OutPoint);
+            DrawTagAt(graphics, inText, inLeft, top, inSize, Theme.Text);
+            DrawTagAt(graphics, outText, outLeft, top, outSize, Theme.Text);
             return;
         }
 
@@ -1036,8 +1171,8 @@ sealed class TimelineControl : Control
         var outTop = top + inSize.Height + gap;
         if (outTop + outSize.Height > film.Bottom - 4)
             outTop = Math.Max(film.Top + 2, film.Bottom - outSize.Height - 4);
-        DrawTagAt(graphics, inText, inLeft, top, inSize, Theme.InPoint);
-        DrawTagAt(graphics, outText, outLeft, outTop, outSize, Theme.OutPoint);
+        DrawTagAt(graphics, inText, inLeft, top, inSize, Theme.Text);
+        DrawTagAt(graphics, outText, outLeft, outTop, outSize, Theme.Text);
     }
 
     Size TagSize(string text)
@@ -1062,11 +1197,6 @@ sealed class TimelineControl : Control
         graphics.FillRectangle(TagBackgroundBrush, rect);
         TextRenderer.DrawText(graphics, text, Theme.Ui(8, FontStyle.Bold), rect, color,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-    }
-
-    static void DrawBorder(Graphics graphics, Rectangle rect)
-    {
-        graphics.DrawRectangle(BorderPen, rect.X, rect.Y, rect.Width - 1, rect.Height - 1);
     }
 
     public static IReadOnlyList<string> SelfCheck()

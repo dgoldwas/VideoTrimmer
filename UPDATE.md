@@ -1,5 +1,17 @@
 # Updates
 
+## 2026-11-15 (2026.11.15.02)
+
+- **New look:** a dark window that takes a muted tint from the current frame, with translucent panels over it. The tint is refreshed once the still settles, never during playback or a drag. The native title bar is recolored to match.
+- **Top bar:** the file, its details and the status share one bar with **Open** and a **⋯** menu (Open, Keyboard shortcuts, updates, About). The status bar is gone; the **⋯** button gets a dot when an update is available. `F1` lists every shortcut.
+- **Dock:** **Split** and **New segment** moved from the sidebar to the bar under the preview, beside the playhead they act on. Transport and zoom buttons are drawn icons.
+- **Sidebar:** the three cards are one panel. Fast copy / Exact frames and Quality are segmented controls, Copy original is a switch, and Subtitles is a dropdown. The Export button fills as the progress bar while an export runs.
+- **Output format:** export as the source's container, MP4, MKV or MOV. A conversion carries the video, the audio and the subtitle tracks the new container can hold (text subtitles become mov_text in MP4 and MOV; picture subtitles are left out there). If a stream cannot be copied into the new container, the app says so and points to Exact frames.
+- **Thumbnails** keep the video's aspect ratio instead of being cropped top and bottom. The selected segment shows its own thumbnails, from its in frame at the left handle to its out frame at the right.
+- **Handles and cuts:** both trim handles use the one amber accent, and cut regions are hatched in neutral gray. Red and green no longer mark out and in.
+- **Overview bar:** the thumb never shrinks below 28 pixels on a long, zoomed-in video; dragging it still covers the whole clip, and clicking the bar jumps there. A timecode ruler runs under the filmstrip.
+- `--check` now covers the container-conversion arguments.
+
 ## 2026-11-15 (2026.11.15.01)
 
 - **Burn in subtitles:** when the video has subtitle tracks, Exact frames offers **Burn in subtitles** (a menu picks the track when there are several). Text subtitles are drawn with libass, using fonts carried in the file; Blu-ray, DVD and DVB picture subtitles are overlaid. It works for one clip, stitched segments and separate files, and the burned file leaves out the subtitle streams. The file info line shows how many subtitle tracks the video has.

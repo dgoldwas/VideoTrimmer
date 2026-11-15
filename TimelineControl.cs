@@ -2,6 +2,27 @@ using System.Drawing.Drawing2D;
 
 namespace VideoTrimmer;
 
+/// <summary>Which ends of the selected segment its own thumbnails are pinned to.</summary>
+enum AnchorEnds { Both, In, Out, Halves }
+
+/// <summary>
+/// The selected segment's own thumbnails. <see cref="AnchorEnds.Both"/>: whole tiles from the in point, the last one pinned
+/// to the out point. <see cref="AnchorEnds.In"/> or <see cref="AnchorEnds.Out"/>: only that end is in view, so whole tiles
+/// run from its handle to the edge of the window, <see cref="Step"/> frames apart. <see cref="AnchorEnds.Halves"/>: the
+/// segment is narrower than about a tile, so the left half of the in frame and the right half of the out frame share it.
+/// </summary>
+readonly record struct AnchorPlan(long In, long Out, AnchorEnds Ends, int Count, double Step)
+{
+    /// <summary>The frame tile <paramref name="index"/> shows. Tiles count from the pinned end.</summary>
+    public long FrameAt(int index) => Ends switch
+    {
+        AnchorEnds.Both => In + (long)Math.Round((Out - 1 - In) * (index / (double)Math.Max(1, Count - 1))),
+        AnchorEnds.In => Math.Min(Out - 1, In + (long)Math.Round(index * Step)),
+        AnchorEnds.Out => Math.Max(In, Out - 1 - (long)Math.Round(index * Step)),
+        _ => index == 0 ? In : Out - 1,
+    };
+}
+
 /// <summary>
 /// The filmstrip with its kept segments and an audio waveform lane, zoomable around any point.
 /// One segment is active: its in and out handles are the ones the user edits. The others are drawn as kept blocks.
@@ -35,10 +56,9 @@ sealed class TimelineControl : Control
     Bitmap?[]? strip;
     long stripStart;
     long stripEnd;
-    // Thumbnails laid from the selected segment's in point to its out point: the first is the in frame, the last the out frame.
+    // The selected segment's own thumbnails, laid out as anchorPlan says.
     Bitmap?[]? anchor;
-    long anchorIn;
-    long anchorOut;
+    AnchorPlan? anchorPlan;
     double duration;
     double fps;
     long totalFrames;
@@ -180,32 +200,41 @@ sealed class TimelineControl : Control
     public double TileWidth => Math.Max(8, FilmRect().Height * (Aspect > 0 ? Aspect : 16 / 9d));
 
     /// <summary>
-    /// The thumbnails the selected segment wants laid from its in point to its out point, or null when it should just
-    /// show the regular strip: it is the whole clip, it runs off the visible window, or it is barely wider than one tile.
+    /// The thumbnails the selected segment wants pinned to its handles, or null when it should just show the regular strip:
+    /// it is the whole clip, neither end is in view, or it is only a few pixels wide. When one end is off the window the
+    /// visible end is anchored; the request then changes with the zoom (through <see cref="AnchorPlan.Step"/>) and with
+    /// how many tiles fit, but not with a pan that keeps both.
     /// </summary>
-    public (long In, long Out, int Count)? AnchorRequest
+    public AnchorPlan? AnchorRequest
     {
         get
         {
             if (!HasMedia || (inFrame <= 0 && outFrame >= totalFrames)) return null;
-            if (inFrame < viewStart - 0.5 || outFrame > viewStart + viewSpan + 0.5) return null;
-            var count = AnchorCount();
-            return count < 2 ? null : (inFrame, outFrame, count);
+            var film = FilmRect();
+            var tile = TileWidth;
+            var viewEnd = viewStart + viewSpan;
+            var inShown = inFrame >= viewStart - 0.5 && inFrame < viewEnd;
+            var outShown = outFrame <= viewEnd + 0.5 && outFrame > viewStart;
+            if (inShown && outShown)
+            {
+                var span = XOf(outFrame) - XOf(inFrame);
+                if (span >= tile * 1.15) return new AnchorPlan(inFrame, outFrame, AnchorEnds.Both, Math.Clamp((int)Math.Ceiling(span / tile), 2, 64), 0);
+                return span >= LogicalToDeviceUnits(16) ? new AnchorPlan(inFrame, outFrame, AnchorEnds.Halves, 2, 0) : null;
+            }
+
+            if (inShown == outShown) return null;
+            var room = inShown ? film.Right - XOf(inFrame) : XOf(outFrame) - film.Left;
+            if (room < LogicalToDeviceUnits(4)) return null;
+            var step = tile / film.Width * viewSpan;
+            return new AnchorPlan(inFrame, outFrame, inShown ? AnchorEnds.In : AnchorEnds.Out, Math.Clamp((int)Math.Ceiling(room / tile), 1, 64), step);
         }
     }
 
-    int AnchorCount()
-    {
-        var span = XOf(outFrame) - XOf(inFrame);
-        return span < TileWidth * 1.15 ? 0 : Math.Clamp((int)Math.Ceiling(span / TileWidth), 2, 64);
-    }
-
-    /// <summary>Shows thumbnails for the segment from <paramref name="start"/> to <paramref name="end"/>, first to last.</summary>
-    public void UseAnchor(Bitmap?[]? images, long start, long end)
+    /// <summary>Shows <paramref name="images"/>, the thumbnails <paramref name="plan"/> asked for, in its order.</summary>
+    public void UseAnchor(Bitmap?[]? images, AnchorPlan? plan)
     {
         anchor = images;
-        anchorIn = start;
-        anchorOut = end;
+        anchorPlan = plan;
         Invalidate();
     }
 
@@ -970,12 +999,14 @@ sealed class TimelineControl : Control
     /// </summary>
     void DrawAnchor(Graphics graphics, Rectangle film)
     {
-        if (anchor is not { Length: > 1 } || anchorIn != inFrame || anchorOut != outFrame) return;
-        if (drag is DragKind.InHandle or DragKind.OutHandle or DragKind.Span || anchor.Length != AnchorCount()) return;
+        if (anchor is null || anchorPlan is not { } plan || anchor.Length != plan.Count) return;
+        if (drag is DragKind.InHandle or DragKind.OutHandle or DragKind.Span || plan != AnchorRequest) return;
         var left = XOf(inFrame);
         var right = XOf(outFrame);
-        // Whole tiles run from the in point; the last one is pinned to the out point instead, over the end of the one
-        // before it. So the in frame and the out frame are both shown uncropped, right against their handles.
+        var middle = (left + right) / 2;
+        // Both ends: whole tiles run from the in point, and the last one is pinned to the out point instead, over the end
+        // of the one before it. One end: whole tiles run from that handle into the window. Either way the pinned frames
+        // are shown uncropped, right against their handles. Halves: each frame keeps its own half of the segment.
         var tile = (float)TileWidth;
         var state = graphics.Save();
         graphics.SetClip(new Rectangle(left, film.Top, right - left, film.Height), CombineMode.Intersect);
@@ -983,10 +1014,25 @@ sealed class TimelineControl : Control
         {
             var image = anchor[i];
             if (image is null) continue;
-            var x = i == anchor.Length - 1 ? right - tile : left + tile * i;
+            var x = plan.Ends switch
+            {
+                AnchorEnds.Both => i == anchor.Length - 1 ? right - tile : left + tile * i,
+                AnchorEnds.In => left + tile * i,
+                AnchorEnds.Out => right - tile * (i + 1),
+                _ => i == 0 ? left : right - tile,
+            };
             var slot = new RectangleF(x, film.Top, tile + 1, film.Height);
             if (slot.Right < film.Left || slot.Left > film.Right) continue;
+            if (plan.Ends != AnchorEnds.Halves)
+            {
+                DrawCover(graphics, image, slot);
+                continue;
+            }
+
+            var half = graphics.Save();
+            graphics.SetClip(i == 0 ? Rectangle.FromLTRB(left, film.Top, middle, film.Bottom) : Rectangle.FromLTRB(middle, film.Top, right, film.Bottom), CombineMode.Intersect);
             DrawCover(graphics, image, slot);
+            graphics.Restore(half);
         }
 
         graphics.Restore(state);
@@ -1235,6 +1281,24 @@ sealed class TimelineControl : Control
         timeline.PickAll();
         timeline.SelectSegment(0);
         Expect(timeline.PickedSegments.Count == 0, "a plain click selects just one");
+
+        // Anchored thumbnails, on a 1000-pixel timeline where one tile is wider than 240 frames of the whole clip.
+        using var film = new TimelineControl { ShowLane = false, Size = new Size(1000, 180) };
+        film.SetClip(40, 30, 1200);
+        film.SetInFrame(300, followPlayhead: false);
+        film.SetOutFrame(600, followPlayhead: false);
+        Expect(film.AnchorRequest is { Ends: AnchorEnds.Halves, Count: 2 } halves && halves.FrameAt(0) == 300 && halves.FrameAt(1) == 599, "a narrow segment shows half of each end");
+        film.SetOutFrame(900, followPlayhead: false);
+        Expect(film.AnchorRequest is { Ends: AnchorEnds.Both } both && both.FrameAt(0) == 300 && both.FrameAt(both.Count - 1) == 899, "a wide segment pins both ends");
+        (film.viewStart, film.viewSpan) = (450, 600);
+        var outOnly = film.AnchorRequest;
+        Expect(outOnly is { Ends: AnchorEnds.Out } o && o.FrameAt(0) == 899 && o.FrameAt(1) < 899, "with the in point off to the left, the out end is anchored");
+        film.viewStart = 451;
+        Expect(film.AnchorRequest == outOnly, "a pan that keeps the tiles keeps the request");
+        (film.viewStart, film.viewSpan) = (0, 600);
+        Expect(film.AnchorRequest is { Ends: AnchorEnds.In } i && i.FrameAt(0) == 300 && i.FrameAt(1) > 300, "with the out point off to the right, the in end is anchored");
+        (film.viewStart, film.viewSpan) = (400, 300);
+        Expect(film.AnchorRequest is null, "a segment that fills the view uses the regular strip");
         return errors;
     }
 

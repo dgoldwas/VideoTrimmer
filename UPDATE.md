@@ -1,5 +1,18 @@
 # Updates
 
+## 2026-11-15 (2026.11.15.03)
+
+- **One title bar:** the window's own caption is gone; the top bar is the title bar, with minimize, maximize and close at its right. Drag it (or the file name and status) to move the window, double-click it to maximize, and hover maximize for Windows 11's snap layouts. Resizing, snapping and the shadow are still Windows' own.
+- **Fast copy into another container** checks the codecs first. When the video or audio can't be copied into MP4 or MOV (WMV3 or TrueHD, say), the panel names them and Export waits for Exact frames, instead of FFmpeg failing partway. With Exact frames and Copy original, the same goes for the audio. A failed export no longer leaves a half-written file.
+- Converting to MP4 or MOV now says when the source's picture subtitles are left out.
+- Typing another video extension in the save dialog replaces it (`clip.mkv` with MP4 chosen saves `clip.mp4`) instead of doubling it.
+- **Thumbnails:** a segment with one end off screen anchors the end in view, and a segment narrower than a thumbnail shows the left half of its in frame and the right half of its out frame.
+- The dock's position readout drops the word "frame", then the edit position, when it doesn't fit; its tooltip has the full text.
+- The tinted backdrop is half the window's size and is rebuilt once a resize ends, not on every step of it.
+- Screen readers can list and pick the options of Fast copy / Exact frames and Quality.
+- The exact preview still seeks close to the frame first, so on a long video it decodes two seconds instead of everything before it.
+- `--render <folder>` saves pictures of the window in its main states. `--check` now covers codec fit, save names, still seeking and anchored thumbnails.
+
 ## 2026-11-15 (2026.11.15.02)
 
 - **New look:** a dark window that takes a muted tint from the current frame, with translucent panels over it. The tint is refreshed once the still settles, never during playback or a drag. The native title bar is recolored to match.

@@ -3,8 +3,12 @@ using System.Text.Json;
 
 namespace VideoTrimmer;
 
-/// <summary><see cref="Aspect"/> is the displayed width over height, after pixel aspect and rotation.</summary>
-readonly record struct MediaInfo(double Duration, double Fps, long Frames, bool HasAudio, double Aspect, IReadOnlyList<SubtitleTrack> Subtitles);
+/// <summary>
+/// <see cref="Aspect"/> is the displayed width over height, after pixel aspect and rotation. <see cref="VideoCodec"/> is the
+/// first video stream's codec_name and <see cref="AudioCodecs"/> every audio stream's, in order.
+/// </summary>
+readonly record struct MediaInfo(double Duration, double Fps, long Frames, bool HasAudio, double Aspect, IReadOnlyList<SubtitleTrack> Subtitles,
+    string VideoCodec, IReadOnlyList<string> AudioCodecs);
 
 /// <summary>A subtitle stream in the source. <see cref="Index"/> counts subtitle streams only, as in FFmpeg's <c>0:s:N</c>.</summary>
 readonly record struct SubtitleTrack(int Index, string Codec, string? Language, string? Title)
@@ -62,8 +66,11 @@ static class MediaProbe
             .FirstOrDefault(stream => stream.ValueKind == JsonValueKind.Object && stream.TryGetProperty("codec_type", out var kind) && kind.GetString() == "video");
         if (video.ValueKind == JsonValueKind.Undefined)
             throw new InvalidOperationException("The file does not contain a video stream.");
-        var hasAudio = root.GetProperty("streams").EnumerateArray()
-            .Any(stream => stream.ValueKind == JsonValueKind.Object && stream.TryGetProperty("codec_type", out var kind) && kind.GetString() == "audio");
+        var audioCodecs = root.GetProperty("streams").EnumerateArray()
+            .Where(stream => stream.ValueKind == JsonValueKind.Object && stream.TryGetProperty("codec_type", out var kind) && kind.GetString() == "audio")
+            .Select(Codec)
+            .ToList();
+        var hasAudio = audioCodecs.Count > 0;
 
         double probedDuration;
         if (video.TryGetProperty("duration", out var videoDuration) && videoDuration.ValueKind == JsonValueKind.String)
@@ -81,8 +88,10 @@ static class MediaProbe
         var rounded = Math.Round(probedDuration * probedFps, MidpointRounding.AwayFromZero);
         if (rounded < 1 || rounded > 1_000_000_000)
             throw new InvalidOperationException("The video duration or frame rate could not be read.");
-        return new MediaInfo(probedDuration, probedFps, (long)rounded, hasAudio, DisplayAspect(video), Subtitles(root));
+        return new MediaInfo(probedDuration, probedFps, (long)rounded, hasAudio, DisplayAspect(video), Subtitles(root), Codec(video), audioCodecs);
     }
+
+    static string Codec(JsonElement stream) => stream.TryGetProperty("codec_name", out var name) ? name.GetString() ?? "" : "";
 
     static IReadOnlyList<SubtitleTrack> Subtitles(JsonElement root)
     {
@@ -93,7 +102,7 @@ static class MediaProbe
             if (stream.ValueKind != JsonValueKind.Object || !stream.TryGetProperty("codec_type", out var kind) || kind.GetString() != "subtitle") continue;
             // Count every subtitle stream, so the index stays in step with FFmpeg's numbering when one is left out.
             index++;
-            var codec = stream.TryGetProperty("codec_name", out var name) ? name.GetString() ?? "" : "";
+            var codec = Codec(stream);
             string? Tag(string key) => stream.TryGetProperty("tags", out var tags) && tags.ValueKind == JsonValueKind.Object
                 && tags.TryGetProperty(key, out var value) && !string.IsNullOrWhiteSpace(value.GetString()) ? value.GetString() : null;
             // Teletext and caption data cannot be burned in by the subtitles or overlay filters.
@@ -137,14 +146,17 @@ static class MediaProbe
 
         const string json = """
             {"streams":[
-              {"codec_type":"video","r_frame_rate":"24/1","duration":"10.0","width":1920,"height":1080},
+              {"codec_type":"video","codec_name":"wmv3","r_frame_rate":"24/1","duration":"10.0","width":1920,"height":1080},
               {"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"eng"}},
-              {"codec_type":"audio"},
+              {"codec_type":"audio","codec_name":"truehd"},
+              {"codec_type":"audio","codec_name":"ac3"},
               {"codec_type":"subtitle","codec_name":"dvb_teletext"},
               {"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"fre","title":"Forced"}}
             ],"format":{"duration":"10.0"}}
             """;
-        var subtitles = Parse(json).Subtitles;
+        var info = Parse(json);
+        var subtitles = info.Subtitles;
+        Expect(info.VideoCodec == "wmv3" && info.AudioCodecs is ["truehd", "ac3"] && info.HasAudio, "the video and audio codecs are read");
         Expect(subtitles.Count == 2, "teletext is left out of the subtitle tracks");
         Expect(subtitles.Count == 2 && subtitles[0].Index == 0 && subtitles[1].Index == 2, "subtitle indexes follow FFmpeg's numbering");
         Expect(subtitles.Count == 2 && !subtitles[0].IsBitmap && subtitles[1].IsBitmap, "picture subtitles are told apart");

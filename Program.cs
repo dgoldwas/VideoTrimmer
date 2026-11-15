@@ -9,6 +9,8 @@ internal static class Program
         {
             var errors = TimeMath.SelfCheck()
                 .Concat(FrameCache.SelfCheck())
+                .Concat(StillCapture.SelfCheck())
+                .Concat(OutputFormats.SelfCheck())
                 .Concat(ExportService.SelfCheck())
                 .Concat(MediaProbe.SelfCheck())
                 .Concat(CutList.SelfCheck())
@@ -23,6 +25,9 @@ internal static class Program
         }
 
         ApplicationConfiguration.Initialize();
+        if (args is ["--render", var folder])
+            Environment.Exit(MainForm.Render(Path.GetFullPath(folder)));
+
         var startup = args.Length > 0 && File.Exists(args[0]) ? args[0] : null;
         Application.Run(new MainForm(startup));
     }

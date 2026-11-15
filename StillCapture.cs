@@ -13,36 +13,13 @@ sealed class StillCapture
 
     public void Clear() => cache.Clear();
 
+    /// <summary>How far before the frame an accurate still jumps with the quick seek, then decodes forward from.</summary>
+    const double AccurateLeadIn = 2;
+
     public async Task<Bitmap?> CaptureAsync(string input, double duration, double seconds, bool accurate, string filter, int quality, CancellationToken token)
     {
         if (runner.Ffmpeg is null) return null;
-        var time = Math.Clamp(seconds, 0, Math.Max(0, duration - 0.001)).ToString("0.######", CultureInfo.InvariantCulture);
-        // Pipe JPEG to stdout so stills skip temp files. Accurate seeks after -i; fast seeks before.
-        string[] args = accurate
-            ?
-            [
-                "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-                "-i", input,
-                "-ss", time,
-                "-frames:v", "1",
-                "-vf", filter,
-                "-q:v", quality.ToString(CultureInfo.InvariantCulture),
-                "-f", "image2pipe",
-                "-vcodec", "mjpeg",
-                "pipe:1",
-            ]
-            :
-            [
-                "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-                "-ss", time,
-                "-i", input,
-                "-frames:v", "1",
-                "-vf", filter,
-                "-q:v", quality.ToString(CultureInfo.InvariantCulture),
-                "-f", "image2pipe",
-                "-vcodec", "mjpeg",
-                "pipe:1",
-            ];
+        var args = Arguments(input, Math.Clamp(seconds, 0, Math.Max(0, duration - 0.001)), accurate, filter, quality);
         try
         {
             var bytes = await runner.RunBinaryAsync(runner.Ffmpeg, args, token).ConfigureAwait(false);
@@ -57,6 +34,48 @@ sealed class StillCapture
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Pipes one JPEG to stdout so stills skip temp files. A fast still seeks before -i, to the keyframe at or before the time.
+    /// An accurate one seeks in two steps: before -i to a little short of the time, then after -i the rest of the way, which
+    /// stays frame-exact but decodes only the lead-in instead of everything from the start of the file.
+    /// </summary>
+    static string[] Arguments(string input, double seconds, bool accurate, string filter, int quality)
+    {
+        var jump = accurate ? Math.Max(0, seconds - AccurateLeadIn) : seconds;
+        return
+        [
+            "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", Text(jump),
+            "-i", input,
+            .. accurate ? ["-ss", Text(seconds - jump)] : Array.Empty<string>(),
+            "-frames:v", "1",
+            "-vf", filter,
+            "-q:v", quality.ToString(CultureInfo.InvariantCulture),
+            "-f", "image2pipe",
+            "-vcodec", "mjpeg",
+            "pipe:1",
+        ];
+    }
+
+    static string Text(double seconds) => seconds.ToString("0.######", CultureInfo.InvariantCulture);
+
+    public static IReadOnlyList<string> SelfCheck()
+    {
+        var errors = new List<string>();
+        void Expect(bool condition, string message)
+        {
+            if (!condition) errors.Add(message);
+        }
+
+        var late = string.Join(" ", Arguments("in.mkv", 600.5, accurate: true, "scale=640:-2", 2));
+        Expect(late.Contains("-ss 598.5 -i in.mkv -ss 2 -frames:v 1"), "an accurate still decodes two seconds, not the whole lead-up");
+        var early = string.Join(" ", Arguments("in.mkv", 0.75, accurate: true, "scale=640:-2", 2));
+        Expect(early.Contains("-ss 0 -i in.mkv -ss 0.75 -frames:v 1"), "an accurate still near the start seeks from zero");
+        var fast = string.Join(" ", Arguments("in.mkv", 600.5, accurate: false, "scale=640:-2", 3));
+        Expect(fast.Contains("-ss 600.5 -i in.mkv -frames:v 1"), "a fast still seeks once, before the input");
+        return errors;
     }
 
     static Bitmap? BitmapFromJpeg(byte[] bytes)

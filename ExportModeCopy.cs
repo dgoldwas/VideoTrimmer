@@ -24,23 +24,50 @@ static class ExportModeCopy
 
     /// <summary>
     /// The one or two sentences under the export options. <paramref name="convertTo"/> names the new container when the
-    /// export changes it, or is null when it keeps the source's.
+    /// export changes it, or is null when it keeps the source's. <paramref name="misfits"/> names the streams the export
+    /// would have to copy into it but can't (see <see cref="OutputFormats.Misfits"/>); <paramref name="dropsPictureSubtitles"/>
+    /// is set when the new container leaves the source's picture subtitles out.
     /// </summary>
-    public static string Summary(bool exact, ExactExportOptions options, int segments, string? convertTo)
+    public static string Summary(bool exact, ExactExportOptions options, int segments, string? convertTo,
+        IReadOnlyList<string>? misfits = null, bool dropsPictureSubtitles = false)
     {
         if (exact)
         {
             var text = ExactBaseExplanation;
             if (segments > 1) text += " " + ExactMultiAudio;
+            else if (convertTo is not null && misfits is { Count: > 0 }) text += " " + ExactMisfitHint(convertTo, misfits);
+            // Several segments carry no subtitle streams at all, which the sentence above already says.
+            if (convertTo is not null && dropsPictureSubtitles && segments == 1) text += " " + PictureSubtitlesHint(convertTo, exact: true);
             return text;
         }
 
         var fast = segments > 1 ? FastMultiExplanation : FastExplanation;
-        return convertTo is null ? fast : fast + " " + FastConvertHint(convertTo);
+        if (convertTo is null) return fast;
+        if (misfits is { Count: > 0 }) return fast + " " + FastMisfitHint(convertTo, misfits);
+        fast += " " + FastConvertHint(convertTo);
+        return dropsPictureSubtitles ? fast + " " + PictureSubtitlesHint(convertTo, exact: false) : fast;
     }
 
     public static string FastConvertHint(string format) =>
         $"They are rewrapped as {format}, which some audio and subtitle types can't be.";
+
+    public static string FastMisfitHint(string format, IReadOnlyList<string> misfits) =>
+        $"{Join(misfits)} can't be copied into {format}. Choose Exact frames to convert it.";
+
+    public static string ExactMisfitHint(string format, IReadOnlyList<string> misfits) =>
+        $"{Join(misfits)} can't be copied into {format}. Turn off Copy original to convert it.";
+
+    /// <summary>In Fast copy the existing hint already says burning in needs Exact frames.</summary>
+    public static string PictureSubtitlesHint(string format, bool exact) => exact
+        ? $"Picture subtitles are left out of {format}; burn one in to keep it."
+        : $"Picture subtitles are left out of {format}.";
+
+    static string Join(IReadOnlyList<string> items) => items.Count switch
+    {
+        1 => items[0],
+        2 => items[0] + " and " + items[1],
+        _ => string.Join(", ", items.Take(items.Count - 1)) + " and " + items[^1],
+    };
 
     public static string ConvertFailedHint(string format, bool exact, bool copyAudio) => exact
         ? copyAudio ? $"This audio can't be copied into {format}. Turn off Copy original and export again." : ""

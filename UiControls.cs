@@ -23,6 +23,23 @@ abstract class GlassControl : Control
     /// <summary>True for a child of a glass panel.</summary>
     public bool OnPanel { get; set; }
 
+    /// <summary>
+    /// Lets the pointer fall through to the window, which treats the spot as part of its title bar: empty parts of the top
+    /// bar, and the maximize button, which Windows must see as one for snap layouts to open over it.
+    /// </summary>
+    public bool PartOfCaption { get; set; }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (PartOfCaption && m.Msg == WindowChrome.WM_NCHITTEST)
+        {
+            m.Result = WindowChrome.HTTRANSPARENT;
+            return;
+        }
+
+        base.WndProc(ref m);
+    }
+
     protected void PaintBase(Graphics g)
     {
         Backdrop.Paint(g, this);
@@ -54,6 +71,8 @@ sealed class GlassLabel : GlassControl
     public bool Wrap { get; set; }
 
     public int MeasureWidth() => TextWidth(Text, Font);
+
+    public int MeasureWidth(string text) => TextWidth(text, Font);
 
     public int MeasureHeight(int width) => TextRenderer.MeasureText(Text, Font, new Size(Math.Max(40, width), int.MaxValue),
         TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak).Height;
@@ -116,6 +135,18 @@ sealed class GlassButton : GlassControl, IButtonControl
     /// <summary>Icon only, when there is no room for the label.</summary>
     public bool Compact { get; set; }
     public DialogResult DialogResult { get; set; }
+
+    /// <summary>The hover fill of a Quiet button, when it is not the usual one (red for the close button).</summary>
+    public Color? HoverFill { get; set; }
+
+    /// <summary>Hover and press for a button whose pointer events go to the window instead (the maximize button).</summary>
+    public void ShowPointer(bool hovered, bool down)
+    {
+        if (hover == hovered && pressed == down) return;
+        hover = hovered;
+        pressed = down;
+        Invalidate();
+    }
 
     /// <summary>0 to 1 fills the button as a progress bar; negative shows it as a normal button.</summary>
     public double Progress
@@ -190,8 +221,9 @@ sealed class GlassButton : GlassControl, IButtonControl
         }
         else if (Kind == ButtonKind.Quiet)
         {
-            if (pressed) PaintUtil.Fill(g, rect, radius, Theme.ControlPressed);
-            else if (hover) PaintUtil.Fill(g, rect, radius, Theme.ControlHover);
+            if (pressed) PaintUtil.Fill(g, rect, radius, HoverFill is { } down ? Theme.Darken(down, 20) : Theme.ControlPressed);
+            else if (hover) PaintUtil.Fill(g, rect, radius, HoverFill ?? Theme.ControlHover);
+            if ((pressed || hover) && HoverFill is not null) text = Color.White;
         }
         else
         {
@@ -315,7 +347,7 @@ sealed class Segmented : GlassControl
         Font = Theme.Ui(9.5f);
         Cursor = Cursors.Hand;
         TabStop = true;
-        AccessibleRole = AccessibleRole.PageTabList;
+        AccessibleRole = AccessibleRole.Grouping;
     }
 
     /// <summary>Raised when the user picks a cell; <see cref="SelectedIndex"/> is not changed for them.</summary>
@@ -332,11 +364,19 @@ sealed class Segmented : GlassControl
         get => selected;
         set
         {
+            var changed = selected != value;
             selected = value;
             AccessibleDescription = value >= 0 && value < items.Length ? items[value] + " selected" : "";
             Invalidate();
+            if (changed && IsHandleCreated && value >= 0 && value < items.Length)
+            {
+                AccessibilityNotifyClients(AccessibleEvents.StateChange, value);
+                AccessibilityNotifyClients(AccessibleEvents.Selection, value);
+            }
         }
     }
+
+    protected override AccessibleObject CreateAccessibilityInstance() => new SegmentedAccessibleObject(this);
 
     RectangleF Cell(int index)
     {
@@ -404,6 +444,97 @@ sealed class Segmented : GlassControl
         }
 
         base.OnKeyDown(e);
+    }
+
+    /// <summary>The control as a group with one radio button per item, so a screen reader can list and pick them.</summary>
+    sealed class SegmentedAccessibleObject : ControlAccessibleObject
+    {
+        readonly Segmented owner;
+        ItemAccessibleObject[] children = [];
+
+        public SegmentedAccessibleObject(Segmented owner) : base(owner) => this.owner = owner;
+
+        public override AccessibleRole Role => AccessibleRole.Grouping;
+        public override string? Name => owner.AccessibleName;
+
+        ItemAccessibleObject[] Children()
+        {
+            if (children.Length != owner.items.Length)
+                children = owner.items.Select((_, i) => new ItemAccessibleObject(this, owner, i)).ToArray();
+            return children;
+        }
+
+        public override int GetChildCount() => owner.items.Length;
+
+        public override AccessibleObject? GetChild(int index) => index >= 0 && index < owner.items.Length ? Children()[index] : null;
+
+        public override AccessibleObject? GetFocused() => owner.Focused ? GetChild(owner.selected) : null;
+
+        public override AccessibleObject? GetSelected() => GetChild(owner.selected);
+
+        public override AccessibleObject? HitTest(int x, int y)
+        {
+            var index = owner.HitAt(owner.PointToClient(new Point(x, y)));
+            return index >= 0 ? GetChild(index) : base.HitTest(x, y);
+        }
+    }
+
+    sealed class ItemAccessibleObject : AccessibleObject
+    {
+        readonly SegmentedAccessibleObject parent;
+        readonly Segmented owner;
+        readonly int index;
+
+        public ItemAccessibleObject(SegmentedAccessibleObject parent, Segmented owner, int index)
+        {
+            this.parent = parent;
+            this.owner = owner;
+            this.index = index;
+        }
+
+        public override AccessibleObject Parent => parent;
+        public override AccessibleRole Role => AccessibleRole.RadioButton;
+        public override string Name => index < owner.items.Length ? owner.items[index] : "";
+        public override string DefaultAction => "Select";
+        public override Rectangle Bounds => owner.RectangleToScreen(Rectangle.Round(owner.Cell(index)));
+
+        public override AccessibleStates State
+        {
+            get
+            {
+                var state = AccessibleStates.Focusable | AccessibleStates.Selectable;
+                if (index == owner.selected) state |= AccessibleStates.Checked | AccessibleStates.Selected;
+                if (index == owner.selected && owner.Focused) state |= AccessibleStates.Focused;
+                if (!owner.Enabled) state |= AccessibleStates.Unavailable;
+                if (!owner.Visible) state |= AccessibleStates.Invisible;
+                return state;
+            }
+        }
+
+        public override AccessibleObject? Navigate(AccessibleNavigation direction) => direction switch
+        {
+            AccessibleNavigation.Next or AccessibleNavigation.Right => parent.GetChild(index + 1),
+            AccessibleNavigation.Previous or AccessibleNavigation.Left => parent.GetChild(index - 1),
+            _ => base.Navigate(direction),
+        };
+
+        public override void DoDefaultAction()
+        {
+            if (!owner.Enabled || !owner.IsHandleCreated || index == owner.selected) return;
+            try
+            {
+                owner.BeginInvoke(new Action(() => owner.Picked?.Invoke(index)));
+            }
+            catch (InvalidOperationException)
+            {
+                // The window closed between the check and the post.
+            }
+        }
+
+        public override void Select(AccessibleSelection flags)
+        {
+            if ((flags & (AccessibleSelection.TakeSelection | AccessibleSelection.AddSelection)) != 0) DoDefaultAction();
+        }
     }
 }
 
@@ -602,8 +733,9 @@ sealed class DropPrompt : GlassControl
 enum StatusKind { Info, Busy, Good, Error }
 
 /// <summary>
-/// The bar under the title bar: the file and its details on the left, the status in the middle, Open and the ⋯ menu
-/// on the right. It replaces both the old toolbar and the status bar.
+/// The window's title bar: the file and its details on the left, the status in the middle, Open and the ⋯ menu, then
+/// minimize, maximize and close on the right. It replaces the native caption, the old toolbar and the status bar.
+/// Its empty parts and its labels drag the window.
 /// </summary>
 sealed class TopBar : GlassControl
 {
@@ -612,6 +744,9 @@ sealed class TopBar : GlassControl
     public GlassLabel Status { get; }
     public GlassButton Open { get; }
     public GlassButton More { get; }
+    public GlassButton Minimize { get; }
+    public GlassButton Maximize { get; }
+    public GlassButton Close { get; }
 
     Color dot = Theme.Good;
     Rectangle dotRect;
@@ -623,7 +758,24 @@ sealed class TopBar : GlassControl
         Status = new GlassLabel { ForeColor = Theme.Muted, Font = Theme.Ui(9), Align = ContentAlignment.MiddleRight, AccessibleName = "Status" };
         Open = new GlassButton { Text = "Open", AccessibleName = "Open a video" };
         More = new GlassButton { Kind = ButtonKind.Quiet, Icon = Icon.More, AccessibleName = "More: shortcuts, updates, about" };
-        Controls.AddRange([FileName, Meta, Status, Open, More]);
+        Minimize = Caption(Icon.Minimize, "Minimize");
+        Maximize = Caption(Icon.Maximize, "Maximize");
+        Maximize.PartOfCaption = true;
+        Close = Caption(Icon.Close, "Close");
+        Close.HoverFill = Color.FromArgb(196, 43, 28);
+        Controls.AddRange([FileName, Meta, Status, Open, More, Minimize, Maximize, Close]);
+        PartOfCaption = true;
+        foreach (var label in new[] { FileName, Meta, Status })
+            WindowChrome.ActAsCaption(label);
+    }
+
+    static GlassButton Caption(Icon icon, string name) => new() { Kind = ButtonKind.Quiet, Icon = icon, AccessibleName = name, TabStop = false };
+
+    public void SetMaximized(bool maximized)
+    {
+        Maximize.Icon = maximized ? Icon.Restore : Icon.Maximize;
+        Maximize.AccessibleName = maximized ? "Restore" : "Maximize";
+        Maximize.Invalidate();
     }
 
     public void SetStatus(string text, StatusKind kind)
@@ -652,7 +804,11 @@ sealed class TopBar : GlassControl
         var pad = S(14);
         var height = S(30);
         var y = (ClientSize.Height - height) / 2;
-        More.SetBounds(ClientSize.Width - S(8) - S(34), y, S(34), height);
+        var caption = S(40);
+        Close.SetBounds(ClientSize.Width - S(6) - caption, y, caption, height);
+        Maximize.SetBounds(Close.Left - S(2) - caption, y, caption, height);
+        Minimize.SetBounds(Maximize.Left - S(2) - caption, y, caption, height);
+        More.SetBounds(Minimize.Left - S(14) - S(34), y, S(34), height);
         var openWidth = Open.PreferredWidth();
         Open.SetBounds(More.Left - S(6) - openWidth, y, openWidth, height);
 
@@ -966,8 +1122,11 @@ sealed class ExportBar : GlassControl
     SubtitleTrack? burn;
     OutputFormat format;
     string sourceExtension = "";
+    string videoCodec = "";
+    IReadOnlyList<string> audioCodecs = [];
     int segments = 1;
     bool busy;
+    bool ready;
 
     public ExportBar()
     {
@@ -1029,11 +1188,14 @@ sealed class ExportBar : GlassControl
     }
 
     /// <summary>A new video starts with nothing burned in and its own container as the format's reference.</summary>
-    public void SetSource(string extension, IReadOnlyList<SubtitleTrack> tracks)
+    public void SetSource(string extension, MediaInfo media)
     {
         sourceExtension = extension;
-        subtitleTracks = tracks;
+        subtitleTracks = media.Subtitles;
+        videoCodec = media.VideoCodec;
+        audioCodecs = media.AudioCodecs;
         burn = null;
+        ready = true;
         SetMode(exactMode);
         OptionsChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -1119,6 +1281,19 @@ sealed class ExportBar : GlassControl
     public bool Converts => format != OutputFormat.Source
         && !OutputFormats.Extension(format, sourceExtension).Equals(sourceExtension, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// The streams this export would copy into a new container that can't hold them. Fast copy copies everything; Exact
+    /// frames copies only the audio, and only with Copy original on a single segment. Export stays off while any are listed,
+    /// since FFmpeg would fail on them partway in.
+    /// </summary>
+    IReadOnlyList<string> Misfits()
+    {
+        if (!Converts) return [];
+        var target = OutputFormats.Extension(format, sourceExtension);
+        if (!exactMode) return OutputFormats.Misfits(target, videoCodec, audioCodecs);
+        return copyAudio && segments == 1 ? OutputFormats.Misfits(target, videoCodec, audioCodecs, includeVideo: false) : [];
+    }
+
     void Sync()
     {
         Quality.SelectedIndex = Array.IndexOf(Qualities, quality);
@@ -1136,8 +1311,13 @@ sealed class ExportBar : GlassControl
             : format == OutputFormat.Source ? OutputFormats.Label(sourceExtension)
             : Converts ? "source is " + OutputFormats.Label(sourceExtension) : "same as source";
         Format.Invalidate();
-        var text = ExportModeCopy.Summary(exactMode, ExactOptions, segments, Converts ? OutputFormats.Name(format) : null)
-            + (!exactMode && HasSubtitles ? " " + ExportModeCopy.FastSubtitlesHint : "");
+        var misfits = Misfits();
+        Export.Enabled = ready && !busy && misfits.Count == 0;
+        // Picture subtitles go only when nothing is burned in: a burned-in export carries no subtitle streams anyway.
+        var dropsPictures = Converts && OutputFormats.IsMp4Family(OutputFormats.Extension(format, sourceExtension))
+            && subtitleTracks.Any(track => track.IsBitmap) && !(exactMode && burn is not null);
+        var text = ExportModeCopy.Summary(exactMode, ExactOptions, segments, Converts ? OutputFormats.Name(format) : null, misfits, dropsPictures)
+            + (!exactMode && HasSubtitles && misfits.Count == 0 ? " " + ExportModeCopy.FastSubtitlesHint : "");
         if (Explanation.Text != text)
         {
             Explanation.Text = text;

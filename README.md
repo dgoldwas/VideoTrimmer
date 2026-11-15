@@ -5,11 +5,11 @@ A small Windows desktop app for cutting a video down to the parts you want to ke
 ## Features
 
 - Open a video by browsing, drag and drop, or Explorer's **Open with** menu.
-- Scrub a filmstrip. Drag the in and out handles, or type a timecode and a frame number together. Thumbnails keep the video's shape, and the selected segment's own thumbnails run from its in frame to its out frame.
+- Scrub a filmstrip. Drag the in and out handles, or type a timecode and a frame number together. Thumbnails keep the video's shape, and the selected segment's own thumbnails run from its in frame to its out frame. When only one end is in view, its thumbnails start at that handle; a very short segment shows half of each end frame.
 - **Zoom** the timeline to work frame by frame in long videos. When zoomed, an overview bar shows the whole clip; drag its thumb to pan, or click the bar to jump. The thumb never shrinks below a grabbable size.
 - **Multi-cut:** keep several segments of one video. On export, choose whether to stitch them into one file or save each segment as its own numbered file (`name_01`, `name_02`, …). Split a segment at the playhead, start a new one, or delete one. Everything outside the kept segments is hatched out.
 - **Segments sidebar:** every segment is listed with its in, out, length and where it lands in the export. Click one to edit its in and out below the list.
-- **Output format:** save in the source's container, or as MP4, MKV or MOV. Fast copy rewraps the streams, which works when their codecs fit the new container; Exact frames re-encodes.
+- **Output format:** save in the source's container, or as MP4, MKV or MOV. Fast copy rewraps the streams, which works when their codecs fit the new container (the panel says when one doesn't, and Export waits for Exact frames); Exact frames re-encodes.
 - **Play the edit:** play/pause plays the kept segments back to back with sound, the way the export will join them. ⏮ and ⏭ skip between cuts.
 - Export a fast stream copy, or re-encode for exact frames. Fast copy can start slightly early, on a keyframe.
 - Exact mode offers High / Balanced / Small quality presets and an optional copy-audio setting.
@@ -66,6 +66,8 @@ The project's `<Version>` (YYYY.MM.DD.##) is the only place the version is set. 
 .\build-installer.ps1 -Install   # ...and install it into Program Files
 .\build-installer.ps1 -Release   # ...and publish it as GitHub release v<version>, which installed copies pick up
 ```
+
+`VideoTrimmer.exe --render <folder>` makes a short test clip and saves pictures of the window in its main states (empty, loaded, trimmed, Exact mode, zoomed, exporting), the ⋯ menu and the shortcuts sheet, for checking the UI without clicking through it.
 
 `build.ps1` runs the `--check` self-test on the published exe and bundles a pinned, checksum-verified GPL FFmpeg build from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) into `tools\`. Exact-frame export needs libx264, which LGPL builds leave out. The installer needs [Inno Setup 6](https://jrsoftware.org/isinfo.php). The icon comes from `assets\make-icon.ps1`.
 

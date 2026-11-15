@@ -4,7 +4,7 @@ namespace VideoTrimmer;
 
 public sealed partial class MainForm : Form
 {
-    const string VideoFilter = "Video files|*.mkv;*.mp4;*.mov;*.avi;*.webm;*.ts;*.m2ts;*.wmv|All files|*.*";
+    static readonly string VideoFilter = "Video files|" + string.Join(";", OutputFormats.VideoExtensions.Select(e => "*" + e)) + "|All files|*.*";
     const string ReadyHint = "Ready";
 
     readonly FfmpegRunner runner = new();
@@ -27,6 +27,8 @@ public sealed partial class MainForm : Form
     // The backdrop takes its color from the still, but only once the still has settled.
     readonly System.Windows.Forms.Timer ambientTimer = new() { Interval = 350 };
     readonly System.Windows.Forms.Timer anchorTimer = new() { Interval = 250 };
+    // The backdrop is rebuilt once a resize settles, not on every step of it.
+    readonly System.Windows.Forms.Timer backdropTimer = new() { Interval = 150 };
 
     SegmentList segmentList => side.List;
     SegmentEditor editor => side.Editor;
@@ -41,7 +43,7 @@ public sealed partial class MainForm : Form
 
     // The selected segment's own thumbnails, from its in frame to its out frame.
     Bitmap?[]? anchorStrip;
-    (long In, long Out, int Count)? anchorKey;
+    AnchorPlan? anchorKey;
     IReadOnlyList<SubtitleTrack> subtitles = [];
 
     string? input;
@@ -56,6 +58,10 @@ public sealed partial class MainForm : Form
     bool layingOut;
     bool previewArmed;
     bool disposed;
+    /// <summary>Between the start and the end of dragging the window's edge (or moving it).</summary>
+    bool sizing;
+    Size backdropSize;
+    string? readoutTip;
     int loadGeneration;
     int previewGeneration;
     int waveGeneration;
@@ -67,7 +73,8 @@ public sealed partial class MainForm : Form
     List<float>? waveLevels;
     Task waveRead = Task.CompletedTask;
 
-    public MainForm(string? startupPath)
+    /// <param name="checkForUpdates">Off for <c>--render</c>, which must not take the last update's result or go online.</param>
+    public MainForm(string? startupPath, bool checkForUpdates = true)
     {
         this.startupPath = startupPath;
         stills = new StillCapture(runner);
@@ -87,6 +94,11 @@ public sealed partial class MainForm : Form
         accurateTimer.Tick += (_, _) => OnAccurateTick();
         ambientTimer.Tick += (_, _) => OnAmbientTick();
         anchorTimer.Tick += (_, _) => OnAnchorTick();
+        backdropTimer.Tick += (_, _) =>
+        {
+            backdropTimer.Stop();
+            if (!sizing) RebuildBackdrop();
+        };
         filmTimer.Tick += (_, _) =>
         {
             filmTimer.Stop();
@@ -98,7 +110,8 @@ public sealed partial class MainForm : Form
             SetStatus("FFmpeg not found — install it or place ffmpeg.exe and ffprobe.exe beside this app.", StatusKind.Error);
         else
             SetStatus("Ready.", StatusKind.Info);
-        StartUpdateChecks();
+        if (checkForUpdates) StartUpdateChecks();
+        else ShowVersion();
     }
 
     void BuildUi()
@@ -121,6 +134,7 @@ public sealed partial class MainForm : Form
 
         topBar.Open.Click += (_, _) => Browse();
         topBar.More.Click += (_, _) => ShowMoreMenu();
+        WireCaptionButtons();
         timeline.ValuesChanged += (_, _) => OnTimelineChanged();
         timeline.InteractionEnded += (_, _) => OnTimelineInteractionEnded();
         timeline.ViewChanged += (_, _) => OnViewChanged();
@@ -220,11 +234,35 @@ public sealed partial class MainForm : Form
     {
         base.OnResize(e);
         // The backdrop is stretched to the window, so every control's patch of it changes with the size.
-        Backdrop.Resize(ClientSize);
+        backdropTimer.Stop();
+        backdropTimer.Start();
+        topBar.SetMaximized(WindowState == FormWindowState.Maximized);
         LayoutChrome();
         Invalidate(true);
         QueueFilmstrip();
         QueueAnchor();
+    }
+
+    protected override void OnResizeBegin(EventArgs e)
+    {
+        sizing = true;
+        base.OnResizeBegin(e);
+    }
+
+    protected override void OnResizeEnd(EventArgs e)
+    {
+        sizing = false;
+        base.OnResizeEnd(e);
+        // A move ends here too, and leaves the size as it was.
+        if (ClientSize != backdropSize) RebuildBackdrop();
+    }
+
+    void RebuildBackdrop()
+    {
+        backdropTimer.Stop();
+        backdropSize = ClientSize;
+        Backdrop.Resize(ClientSize);
+        Invalidate(true);
     }
 
     protected override void OnDpiChanged(DpiChangedEventArgs e)
@@ -269,8 +307,10 @@ public sealed partial class MainForm : Form
             filmTimer.Stop();
             ambientTimer.Stop();
             anchorTimer.Stop();
+            backdropTimer.Stop();
             ambientTimer.Dispose();
             anchorTimer.Dispose();
+            backdropTimer.Dispose();
             preview.Image = null;
             player.Dispose();
             timeline.UseStrip(null, 0, 0);
@@ -438,6 +478,8 @@ public sealed partial class MainForm : Form
             timeline.SetBounds(pad, timelineTop, mainWidth, timelineHeight);
             side.SetBounds(sideLeft, top + pad, sideWidth, Math.Max(S(200), bottom - pad - top - pad));
             side.PerformLayout();
+            // The readout's room changed with the dock.
+            UpdateReadout(timeline.PlayheadFrame);
         }
         finally
         {
@@ -557,8 +599,7 @@ public sealed partial class MainForm : Form
         drop.Visible = false;
         foreach (Control control in new Control[] { previewHost, transport, timeline, side })
             control.Visible = true;
-        exportBar.Export.Enabled = true;
-        exportBar.SetSource(Path.GetExtension(path), media.Subtitles);
+        exportBar.SetSource(Path.GetExtension(path), media);
         LayoutChrome();
         WriteBoxes();
         UpdateReadouts();
@@ -624,13 +665,32 @@ public sealed partial class MainForm : Form
         UpdateReadout(timeline.PlayheadFrame);
     }
 
-    /// <summary>The playhead in the source, and where it lands in the export.</summary>
+    /// <summary>
+    /// The playhead in the source, and where it lands in the export. When the dock is too narrow it drops the word
+    /// "frame", then the edit position, rather than end in an ellipsis; the tooltip keeps the full text.
+    /// </summary>
     void UpdateReadout(long frame)
     {
         var kept = timeline.ExportSegments;
         var edited = CutList.EditedFrame(kept, frame);
         var cut = kept.Any(segment => segment.Contains(frame)) ? "" : "   (cut)";
-        transport.Readout.Text = $"{TimeMath.Format(frame, timeline.Fps)}  frame {frame:N0}     Edit {TimeMath.Format(edited, timeline.Fps)} / {TimeMath.Format(CutList.KeptFrames(kept), timeline.Fps)}{cut}";
+        var time = TimeMath.Format(frame, timeline.Fps);
+        var edit = $"     Edit {TimeMath.Format(edited, timeline.Fps)} / {TimeMath.Format(CutList.KeptFrames(kept), timeline.Fps)}";
+        var full = $"{time}  frame {frame:N0}{edit}{cut}";
+        var room = transport.Readout.Width;
+        var text = full;
+        foreach (var shorter in new[] { $"{time}  {frame:N0}{edit}{cut}", $"{time}  {frame:N0}{cut}" })
+        {
+            if (room <= 0 || transport.Readout.MeasureWidth(text) <= room) break;
+            text = shorter;
+        }
+
+        transport.Readout.Text = text;
+        if (readoutTip != full)
+        {
+            readoutTip = full;
+            tips.SetToolTip(transport.Readout, full);
+        }
     }
 
     void WriteBoxes()
@@ -865,6 +925,7 @@ public sealed partial class MainForm : Form
         }
 
         Backdrop.SetFrame(preview.Image, ClientSize);
+        backdropSize = ClientSize;
         Invalidate(true);
     }
 
@@ -940,17 +1001,16 @@ public sealed partial class MainForm : Form
         anchorKey = want;
         ReplaceCts(ref anchorCts);
         if (want is { } request) _ = BuildAnchorAsync(input, request, timeline.ThumbHeight, anchorCts.Token);
-        else ShowAnchor(null, 0, 0);
+        else ShowAnchor(null, null);
     }
 
     /// <summary>
-    /// The first tile is the segment's in frame and the last is its out frame, so the strip shows where the cut lands.
+    /// The tiles pinned to the handles show the segment's in and out frames, so the strip shows where the cut lands.
     /// They use the same quick seek as the regular strip: seeking after the input would decode the file from its start.
     /// </summary>
-    async Task BuildAnchorAsync(string path, (long In, long Out, int Count) request, int height, CancellationToken token)
+    async Task BuildAnchorAsync(string path, AnchorPlan request, int height, CancellationToken token)
     {
         var slots = new Bitmap?[request.Count];
-        var last = request.Count - 1;
         using var gate = new SemaphoreSlim(3);
         try
         {
@@ -959,8 +1019,7 @@ public sealed partial class MainForm : Form
                 await gate.WaitAsync(token);
                 try
                 {
-                    var frame = request.In + (long)Math.Round((request.Out - 1 - request.In) * (i / (double)last));
-                    var time = timeline.SeekTime(frame);
+                    var time = timeline.SeekTime(request.FrameAt(i));
                     // The probed length can run a little past the last real frame; step back rather than leave a hole.
                     slots[i] = await stills.CaptureAsync(path, duration, time, accurate: false, "scale=-2:" + height, 5, token)
                         ?? await stills.CaptureAsync(path, duration, Math.Max(0, time - 0.5), accurate: false, "scale=-2:" + height, 5, token);
@@ -982,14 +1041,14 @@ public sealed partial class MainForm : Form
             return;
         }
 
-        ShowAnchor(slots, request.In, request.Out);
+        ShowAnchor(slots, request);
     }
 
-    void ShowAnchor(Bitmap?[]? slots, long start, long end)
+    void ShowAnchor(Bitmap?[]? slots, AnchorPlan? plan)
     {
         var old = anchorStrip;
         anchorStrip = slots;
-        timeline.UseAnchor(slots, start, end);
+        timeline.UseAnchor(slots, plan);
         if (old is null) return;
         foreach (var bitmap in old) bitmap?.Dispose();
     }
@@ -1016,7 +1075,7 @@ public sealed partial class MainForm : Form
         stills.Clear();
         filmstrip.Clear(timeline);
         anchorKey = null;
-        ShowAnchor(null, 0, 0);
+        ShowAnchor(null, null);
     }
 
     async void Export()
@@ -1059,8 +1118,11 @@ public sealed partial class MainForm : Form
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         var output = dialog.FileName;
         // A different extension typed in the dialog would quietly change the format, so the chosen one is kept.
-        if (format != OutputFormat.Source && !Path.GetExtension(output).Equals(extension, StringComparison.OrdinalIgnoreCase))
-            output += extension;
+        if (format != OutputFormat.Source) output = OutputFormats.SaveName(output, extension);
+        // The dialog asked about the name as typed, not the one with the extension fixed.
+        if (!separate && output != dialog.FileName && File.Exists(output) && MessageBox.Show(this,
+                $"{Path.GetFileName(output)} already exists.\n\nReplace it?",
+                "VideoTrimmer", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
         var remux = Remux.For(input, output, subtitles);
         var outputs = separate ? ExportService.SeparateOutputs(output, segments.Count) : [output];
         if (outputs.Any(path => string.Equals(Path.GetFullPath(path), Path.GetFullPath(input), StringComparison.OrdinalIgnoreCase)))
@@ -1082,7 +1144,6 @@ public sealed partial class MainForm : Form
         exporting = true;
         PauseWaveform();
         timeline.Locked = true;
-        exportBar.Export.Enabled = false;
         exportBar.SetBusy(true);
         exportBar.Export.Text = "Exporting…";
         exportBar.Export.Progress = 0;
@@ -1139,6 +1200,9 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
+            // As on cancel: what finished is kept, and the half-written file is removed.
+            foreach (var path in separate ? outputs.Skip(completed) : outputs)
+                ExportService.TryDelete(path);
             if (!IsDisposed)
             {
                 SetStatus("Export failed: " + ex.Message, StatusKind.Error);
@@ -1156,7 +1220,6 @@ public sealed partial class MainForm : Form
             if (!IsDisposed)
             {
                 exportBar.SetBusy(false);
-                exportBar.Export.Enabled = timeline.HasMedia;
                 UpdateReadouts();
                 LayoutChrome();
                 ResumeWaveform();

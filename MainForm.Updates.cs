@@ -47,7 +47,9 @@ public sealed partial class MainForm
             : "Shortcuts, updates and About");
     }
 
-    void ShowMoreMenu()
+    void ShowMoreMenu() => Menus.ShowBelow(MoreMenu(), topBar.More, alignRight: true);
+
+    ContextMenuStrip MoreMenu()
     {
         var menu = Menus.Create();
         menu.Items.Add(Menus.Item("Open video…", false, Browse, "Ctrl+O", enabled: !exporting));
@@ -55,7 +57,7 @@ public sealed partial class MainForm
         menu.Items.Add(Menus.Separator());
         menu.Items.Add(Menus.Item(updateLabel, false, OnUpdateClick, enabled: !updateBusy));
         menu.Items.Add(Menus.Item("About VideoTrimmer", false, ShowAbout, UpdateService.CurrentVersion));
-        Menus.ShowBelow(menu, topBar.More, alignRight: true);
+        return menu;
     }
 
     void ShowAbout()

@@ -16,6 +16,7 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="assets\VideoTrimmer.ico" LogicalName="VideoTrimmer.ico" />
     <Compile Remove="tests\**\*.cs" />
     <None Update="tools\ffmpeg.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
     <None Update="tools\ffprobe.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />

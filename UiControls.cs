@@ -860,6 +860,29 @@ sealed class TopBar : GlassControl
 
     static GlassButton Caption(Icon icon, string name) => new() { Kind = ButtonKind.Quiet, Icon = icon, AccessibleName = name, TabStop = false };
 
+    Bitmap? mark;
+
+    /// <summary>The app icon, from the frame of the .ico nearest the size it is drawn at, so it matches the taskbar.</summary>
+    static Bitmap AppMark(int size)
+    {
+        using var stream = typeof(TopBar).Assembly.GetManifestResourceStream("VideoTrimmer.ico")!;
+        using var icon = new System.Drawing.Icon(stream, size, size);
+        using var frame = icon.ToBitmap();
+        if (frame.Width == size) return new Bitmap(frame);
+        var scaled = new Bitmap(size, size);
+        using var g = Graphics.FromImage(scaled);
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        g.DrawImage(frame, 0, 0, size, size);
+        return scaled;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) mark?.Dispose();
+        base.Dispose(disposing);
+    }
+
     public void SetMaximized(bool maximized)
     {
         Maximize.Icon = maximized ? Icon.Restore : Icon.Maximize;
@@ -895,7 +918,13 @@ sealed class TopBar : GlassControl
         var g = e.Graphics;
         PaintBase(g);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        Icons.Draw(g, Icon.Split, new RectangleF(S(14), (ClientSize.Height - S(18)) / 2f, S(18), S(18)), Theme.AccentInk);
+        var size = S(18);
+        if (mark?.Width != size)
+        {
+            mark?.Dispose();
+            mark = AppMark(size);
+        }
+        g.DrawImage(mark, S(14), (ClientSize.Height - size) / 2, size, size);
         using var line = new Pen(Theme.Hairline);
         g.DrawLine(line, 0, ClientSize.Height - 1, ClientSize.Width, ClientSize.Height - 1);
     }

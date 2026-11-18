@@ -1,8 +1,104 @@
-# VideoTrimmer
+<p align="center">
+  <img src="assets/VideoTrimmer.png" width="112" alt="VideoTrimmer icon">
+</p>
 
-A small Windows desktop app for cutting a video down to the parts you want to keep. VideoTrimmer is built with C# and WinForms on .NET 8. It uses FFmpeg and FFprobe as separate processes, so it can inspect and trim large files without loading the full video into memory.
+<h1 align="center">VideoTrimmer</h1>
 
-## Features
+<p align="center">
+  <b>Cut the parts you don't want. Keep the rest. Done in seconds.</b><br>
+  A fast, free and open-source video trimmer for Windows that never makes you wait on a re-encode you didn't ask for.
+</p>
+
+<p align="center">
+  <a href="https://github.com/dgoldwas/VideoTrimmer/releases/latest"><b>⬇ Download for Windows</b></a>
+  &nbsp;·&nbsp;
+  <a href="#what-you-get">Features</a>
+  &nbsp;·&nbsp;
+  <a href="#controls">Shortcuts</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/dgoldwas/VideoTrimmer/releases/latest"><img src="https://img.shields.io/github/v/release/dgoldwas/VideoTrimmer?label=latest&color=f5c24c" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-2b6cb0" alt="Windows 10 and 11">
+  <img src="https://img.shields.io/badge/FFmpeg-included-3a8d3a" alt="FFmpeg included">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-6b7280" alt="MIT license"></a>
+</p>
+
+<p align="center">
+  <img src="docs/images/hero.png" alt="VideoTrimmer with three kept segments: the preview, the segment list, and a filmstrip with the cut-out parts hatched" width="100%">
+</p>
+
+Most video editors are built for making something new. VideoTrimmer is built for the job you actually have: **take a long recording, a game capture, a TV episode or a phone video, and get rid of the bits you don't want.** Drop the file in, mark what to keep, press Export. A two-hour 4K file trims in roughly the time it takes to copy it, because by default the video is never re-encoded.
+
+## Why VideoTrimmer
+
+- **⚡ Fast.** *Fast video copy* copies the original video stream as-is. No loss in picture quality, no waiting on an encoder, no fan noise.
+- **🎯 Frame-accurate when it matters.** Switch to *Exact frames* and the cut lands on the exact frame you chose, with High, Balanced or Small quality and an optional 1080p downscale.
+- **✂ Many cuts, one pass.** Keep as many segments as you like. Export them stitched into one file, or as separate numbered clips.
+- **▶ Hear the joins before you commit.** Play the edit with sound, back to back, exactly as the export will join it.
+- **🌈 HDR that looks right.** HDR10, HLG and Dolby Vision footage is tone-mapped to SDR automatically, in the preview and in the export, so it doesn't come out grey and washed out.
+- **💬 Subtitles in the picture.** Burn text subtitles (SRT, ASS, WebVTT) or Blu-ray and DVD picture subtitles into an Exact frames export.
+- **📁 Huge files welcome.** FFmpeg does the heavy lifting in the background, so even very large MKVs open quickly and never get loaded into memory.
+- **🔄 Always current.** One installer, FFmpeg included, and VideoTrimmer updates itself from GitHub releases with a checksum check.
+
+## What you get
+
+### Cut out an ad break in seconds
+
+Put the playhead where the break starts and press `S`. Move to where it ends and press `S` again. Select the middle segment and press `Delete`. Press `Space` a little before the join to check it. The filmstrip hatches out everything you've removed, and each kept segment gets a numbered badge so you can see the shape of your edit at a glance.
+
+<p align="center">
+  <img src="docs/images/timeline.png" alt="The filmstrip with three numbered kept segments and the removed parts hatched out" width="100%">
+</p>
+
+The **Segments** sidebar lists every piece you're keeping: its in and out, its length, and where it will land in the export. Click one to fine-tune it by timecode or frame number. `Ctrl`+click a few to export just those. Drag one segment into another to merge them. Made a mistake? `Ctrl+Z`.
+
+### Fast copy or exact frames: your call
+
+<p align="center">
+  <img src="docs/images/exact-export.png" alt="An Exact frames export in progress, with quality presets, a 1080p size option, and a progress bar beside a Cancel button" width="100%">
+</p>
+
+**Fast video copy** finishes in seconds and keeps the original picture untouched; the cut may start a moment early, on the nearest keyframe. **Exact frames** re-encodes only the parts you keep, so every cut is precise. Either way, save in the source's container or as MP4, MKV or MOV, with audio converted to stereo AAC so it plays everywhere. Progress shows in its own strip, and Cancel is always one click away.
+
+Zoom the timeline (`Ctrl`+wheel, or `+` and `-`) to work frame by frame in a long video. An overview bar keeps the whole clip in view while you're zoomed in.
+
+### Looks at home on your desktop
+
+<p align="center">
+  <img src="docs/images/themes.png" alt="The same window in the dark theme on the left and the light theme on the right" width="100%">
+</p>
+
+Dark or light, with seven accent colors. The backdrop picks up a soft tint from the frame you're looking at.
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/settings.png" alt="Settings: theme and accent color" width="100%"><br>
+      <b>Make it yours.</b> Pick a theme and accent in Settings (<code>Ctrl+,</code>). Changes show instantly.
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/shortcuts.png" alt="The keyboard shortcuts sheet" width="100%"><br>
+      <b>Keyboard first.</b> Every action has a shortcut. Press <code>F1</code> any time to see them all.
+    </td>
+  </tr>
+</table>
+
+### Pick up where you left off
+
+Save your segment list as a **project** (`Ctrl+S`) and reopen it later to carry on where you stopped. A dot in the title bar tells you when something isn't saved, and VideoTrimmer asks before throwing work away.
+
+## Get it
+
+1. Download **`VideoTrimmer-<version>-Setup.exe`** from the [latest release](https://github.com/dgoldwas/VideoTrimmer/releases/latest).
+2. Run it. FFmpeg is bundled; there's nothing else to install.
+3. Right-click any video in Explorer and choose **Open with → VideoTrimmer**, or drop a file on the window.
+
+Works with MKV, MP4, MOV, AVI, WebM, TS, M2TS, WMV and more. Requires 64-bit Windows 10 or 11.
+
+---
+
+## Full feature list
 
 - Open a video by browsing, drag and drop, or Explorer's **Open with** menu.
 - Scrub a filmstrip. Drag the in and out handles, or type a timecode and a frame number together. Thumbnails keep the video's shape, and the selected segment's own thumbnails run from its in frame to its out frame. When only one end is in view, its thumbnails start at that handle; a very short segment shows half of each end frame.
@@ -105,3 +201,9 @@ The audio waveform under the filmstrip is turned off for now (`WaveformEnabled` 
 - `UPDATE.md`: changelog and packaging notes.
 
 Generated build folders, published binaries, and the local sample video are excluded from Git.
+
+## License
+
+VideoTrimmer is released under the [MIT License](LICENSE).
+
+The installer and portable build bundle FFmpeg and FFprobe from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds). These are GPL builds, licensed separately under their own terms; see [FFmpeg Legal](https://ffmpeg.org/legal.html). VideoTrimmer runs them as separate programs and does not link to them. Playback uses [NAudio](https://github.com/naudio/NAudio) (MIT).
